@@ -1,5 +1,5 @@
 # PhysicsEngine
-Physics engine with simulation of mechanical systems with C++
+Physics engine for simulation of mechanical systems with C++
 
 run:
 
