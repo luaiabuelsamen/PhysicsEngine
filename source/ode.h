@@ -3,6 +3,4 @@
 
 #include <iostream>
 
-int printing();
-
 #endif
