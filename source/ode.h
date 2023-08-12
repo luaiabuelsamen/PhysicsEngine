@@ -1,6 +1,8 @@
-#ifndef PLAYER_H    // To make sure you don't declare the function more than once by including the header multiple times.
-#define PLAYER_H
+#ifndef RK4_SOLVER_H
+#define RK4_SOLVER_H
 
-#include <iostream>
+#include <cmath>
+template<typename Func>
+float rk4(float x0, float y0, float xn, int n, Func&& f);
 
-#endif
+#endif // RK4_SOLVER_H
