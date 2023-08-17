@@ -1,6 +1,8 @@
-#include "ode.h"
+#ifndef RK4_SOLVER_H
+#define RK4_SOLVER_H
 
-using namespace std;
+#include <cmath>
+#include <functional>
 
 template<typename Func>
 float rk4(float x0, float y0, float xn, int n, Func&& f) {
@@ -25,3 +27,5 @@ float rk4(float x0, float y0, float xn, int n, Func&& f) {
 
     return yn;
 }
+
+#endif // RK4_SOLVER_H

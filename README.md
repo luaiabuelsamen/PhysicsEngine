@@ -6,9 +6,9 @@ The **PhysicsEngine** is a C++ program that simulates mechanical systems using n
 
 To run the **PhysicsEngine**, follow these steps:
 
-1. Install the required libraries by running:
+1. Start the development envrionment by running the docker container:
    ```
-   pip install -r requirements.txt
+   ./runDocker
    ```
 
 2. Build the executable by running the build script:

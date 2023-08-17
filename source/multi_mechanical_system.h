@@ -3,6 +3,8 @@
 
 #include <vector>
 #include "mechanical_system.h" // Include the header for MechanicalSystem
+#include <Eigen/Dense>
+#include <Eigen/SVD>
 
 class NDOFSystem {
 private:

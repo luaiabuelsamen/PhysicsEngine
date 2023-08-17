@@ -4,11 +4,11 @@
 #include <Eigen/SVD>
 
 class NDOFSystem {
-Private:
+private:
     std::vector<MechanicalSystem> systems;
     std::vector<std::vector<float>> couplingForces;
     int numDOF;
-    
+
 public:
     NDOFSystem(const std::vector<MechanicalSystem>& systemInstances,
                const std::vector<std::vector<float>>& couplingForcesMatrix)

@@ -1,5 +1,5 @@
 #include "mechanical_system.h"
-#include "ndof_system.h"
+#include "multi_mechanical_system.h"
 #include <Eigen/Dense>
 #include <iostream>
 
@@ -19,27 +19,27 @@ int main() {
         {0.0, 1.0, 0.0}  // Coupling between cart 3 and cart 2
     };
 
-    NDOFSystem ndofSystem(systemInstances, couplingMatrix);
+    // NDOFSystem ndofSystem(systemInstances, couplingMatrix);
 
     // Apply an impulse force to the first cart at t = 0.5 seconds
-    ndofSystem.updateSystems(0.5);
+    // ndofSystem.updateSystems(0.5);
 
-    // Get the combined positions and velocities of the system at t = 0.5 seconds
-    std::vector<float> combinedPositions = ndofSystem.getCombinedPositions(0.5);
-    std::vector<float> combinedVelocities = ndofSystem.getCombinedVelocities(0.5);
+    // // // Get the combined positions and velocities of the system at t = 0.5 seconds
+    // // std::vector<float> combinedPositions = ndofSystem.getCombinedPositions(0.5);
+    // // std::vector<float> combinedVelocities = ndofSystem.getCombinedVelocities(0.5);
 
-    // Calculate and print the mass, damping, and stiffness matrices
-    Eigen::MatrixXf massMatrix = ndofSystem.getMassMatrix();
-    Eigen::MatrixXf dampingMatrix = ndofSystem.getDampingMatrix();
-    Eigen::MatrixXf stiffnessMatrix = ndofSystem.getStiffnessMatrix();
+    // // Calculate and print the mass, damping, and stiffness matrices
+    // Eigen::MatrixXf massMatrix = ndofSystem.getMassMatrix();
+    // Eigen::MatrixXf dampingMatrix = ndofSystem.getDampingMatrix();
+    // Eigen::MatrixXf stiffnessMatrix = ndofSystem.getStiffnessMatrix();
 
-    std::cout << "Mass Matrix:\n" << massMatrix << std::endl;
-    std::cout << "Damping Matrix:\n" << dampingMatrix << std::endl;
-    std::cout << "Stiffness Matrix:\n" << stiffnessMatrix << std::endl;
+    // std::cout << "Mass Matrix:\n" << massMatrix << std::endl;
+    // std::cout << "Damping Matrix:\n" << dampingMatrix << std::endl;
+    // std::cout << "Stiffness Matrix:\n" << stiffnessMatrix << std::endl;
 
-    // Calculate and print the natural frequencies of the system
-    Eigen::VectorXf naturalFrequency = ndofSystem.getNaturalFrequency();
-    std::cout << "Natural Frequencies:\n" << naturalFrequency << std::endl;
+    // // Calculate and print the natural frequencies of the system
+    // Eigen::VectorXf naturalFrequency = ndofSystem.getNaturalFrequency();
+    // std::cout << "Natural Frequencies:\n" << naturalFrequency << std::endl;
 
     return 0;
 }
