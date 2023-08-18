@@ -13,7 +13,10 @@ RUN apt update && \
 apt install -y software-properties-common && \
 add-apt-repository ppa:deadsnakes/ppa && \
 apt update && \
-apt install -y python3.8
+apt-get install -y \
+g++ \
+python3.8 \
+python3.8-dev
 
 RUN apt install -y python3.8-distutils && \
 apt install -y curl &&\
@@ -24,7 +27,8 @@ RUN apt install -y build-essential && \
 wget https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz && \
 tar -xzvf eigen-3.4.0.tar.gz && \
 mv eigen-3.4.0 ~/eigen-3.4.0 && \
-ln -s ~/eigen-3.4.0 /usr/local/include/eigen3
+ln -s ~/eigen-3.4.0 /usr/local/include/eigen3 && \
+curl -O https://raw.githubusercontent.com/lava/matplotlib-cpp/master/matplotlibcpp.h
 
 COPY requirements.txt /app/
 RUN python3.8 -m pip install -r /app/requirements.txt

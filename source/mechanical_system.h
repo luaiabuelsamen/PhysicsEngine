@@ -27,7 +27,7 @@ public:
     float getVelocity(float T) const;
 
     void updateExternalForce(float forceFunction, float T);
-    void createPlot(float T) const;
+    void createPlot(float T);
 };
 
 #endif // MECHANICAL_SYSTEM_H

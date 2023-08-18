@@ -3,8 +3,8 @@
 #include <cmath>
 #include <functional>
 #include "mechanical_system.h"
-// #include "matplotlibcpp.h"
-// namespace plt = matplotlibcpp;
+#include <matplotlibcpp.h>
+namespace plt = matplotlibcpp;
 
 using namespace std;
 using namespace placeholders;
@@ -45,7 +45,7 @@ float MechanicalSystem::velocityDerivative(float t, float vel, float damping, fl
 float MechanicalSystem::getPos(float T) const {
     float x0 = 0.0;  // Initial time
     float y0 = initialPosition;
-    int n = static_cast<int>(abs(T - x0));  // Number of steps
+    float n = 0.001;
 
     return rk4(x0, y0, T, n, positionDerivative, initialVelocity);
 }
@@ -63,27 +63,24 @@ void MechanicalSystem::updateExternalForce(float forceFunction, float T) {
     externalForce = forceFunction;
 }
 
-// void createPlot(float T) const {
-//     // Create a figure and plot the trajectory
-//     cppplotlib::figure fig;
-//     cppplotlib::plot plt;
+void MechanicalSystem::createPlot(float T) {
+    // Generate points for the trajectory plot
+    std::vector<float> timePoints;
+    std::vector<float> positionPoints;
 
-//     // Generate points for the trajectory plot
-//     std::vector<float> timePoints;
-//     std::vector<float> positionPoints;
+    float timeStep = 0.01;  // Time step for generating points
+    float currentPosition = initialPosition; // Initialize position with the initial position
+    for (float t = 0.0; t <= T; t += timeStep) {
+        timePoints.push_back(t);
+        currentPosition = getPos(t); // Calculate position using the updated getPos method
+        std::cout << currentPosition << std::endl;
+        positionPoints.push_back(currentPosition);
+    }
 
-//     float timeStep = 0.01;  // Time step for generating points
-//     float currentPosition = initialPosition; // Initialize position with the initial position
-//     for (float t = 0.0; t <= T; t += timeStep) {
-//         timePoints.push_back(t);
-//         currentPosition = getPos(t); // Calculate position using the updated getPos method
-//         positionPoints.push_back(currentPosition);
-//     }
-
-//     plt.plot(timePoints, positionPoints);
-//     plt.xlabel("Time");
-//     plt.ylabel("Position");
-//     plt.title("Trajectory of the Mass");
-//     fig.show();
-// }
-
+    // Create a plot
+    plt::plot(timePoints, positionPoints);
+    plt::xlabel("Time");
+    plt::ylabel("Position");
+    plt::title("Trajectory of the Mass");
+    plt::save("spring_figure.png");
+}
