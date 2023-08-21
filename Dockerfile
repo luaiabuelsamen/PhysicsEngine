@@ -28,7 +28,12 @@ wget https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz && \
 tar -xzvf eigen-3.4.0.tar.gz && \
 mv eigen-3.4.0 ~/eigen-3.4.0 && \
 ln -s ~/eigen-3.4.0 /usr/local/include/eigen3 && \
-curl -O https://raw.githubusercontent.com/lava/matplotlib-cpp/master/matplotlibcpp.h
+wget -O ~/matplotlibcpp.h "https://raw.githubusercontent.com/lava/matplotlib-cpp/master/matplotlibcpp.h"
+
+# Install required packages including OpenCV
+RUN apt-get update && apt-get install -y \
+    libopencv-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/
 RUN python3.8 -m pip install -r /app/requirements.txt

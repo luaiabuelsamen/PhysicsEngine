@@ -5,11 +5,15 @@
 #include <functional>
 
 template<typename Func, typename... Args>
-float rk4(float x0, float y0, float xn, float h, Func&& f, Args&&... args) {
-    float yn, k1, k2, k3, k4, k;
+float rk4(float x0, float y0, float xn, int n, Func&& f, Args&&... args) {
+    float h, yn, k1, k2, k3, k4, k;
+    int i;
+
+    /* Calculating step size (h) */
+    h = (xn - x0) / n;
 
     /* Runge Kutta Method */
-    while (x0 < xn)
+    for (i = 0; i < n; i++)
     {
         k1 = h * f(x0, y0, std::forward<Args>(args)...);
         k2 = h * f(x0 + h / 2, y0 + k1 / 2, std::forward<Args>(args)...);
