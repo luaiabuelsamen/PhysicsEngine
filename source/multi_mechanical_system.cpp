@@ -1,5 +1,5 @@
 #include <vector>
-#include "mechanical_system.h"
+#include "MechanicalSystem.h"
 #include <Eigen/Dense>
 #include <Eigen/SVD>
 
