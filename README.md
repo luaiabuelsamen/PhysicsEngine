@@ -29,7 +29,7 @@ Physics engine for simulation of mechanical systems with C++
 
 ![Example plot](static/spring_figure.png)
 
-![Example video](static/spring_motion_video.avi)
+![Example video](static/demo.gif)
 
 The program demonstrates the simulation of a 3-degree-of-freedom (3-DOF) mechanical system consisting of masses, springs, dampers, and external forces. The coupling between the individual carts is defined through a coupling matrix. An impulse force is applied to the first cart at a specific time.
 
