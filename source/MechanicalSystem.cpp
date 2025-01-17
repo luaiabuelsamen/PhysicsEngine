@@ -1,12 +1,10 @@
 #include "MechanicalSystem.h"
 #include <cmath>
 #include <matplotlibcpp.h>
-#include <opencv2/opencv.hpp>
 
 namespace plt = matplotlibcpp;
 
 using namespace std;
-using namespace cv;
 
 MechanicalSystem::MechanicalSystem(float m, float c, float k, float x0, float v0)
     : mass(m), damping(c), springConstant(k), initialPosition(x0), initialVelocity(v0) {}
@@ -17,6 +15,11 @@ float MechanicalSystem::getDamping() const { return damping; }
 float MechanicalSystem::getSpringConstant() const { return springConstant; }
 float MechanicalSystem::getInitialPosition() const { return initialPosition; }
 float MechanicalSystem::getInitialVelocity() const { return initialVelocity; }
+
+// Setter methods
+void MechanicalSystem::setMass(float m){m = m;}
+void MechanicalSystem::setStiffness(float k){k = k;}
+void MechanicalSystem::setDamping(float c){c = c;}
 
 float MechanicalSystem::positionDerivative(float t, float x, float v) const {
     return v;
@@ -86,34 +89,13 @@ void MechanicalSystem::createPlot(float T) {
     int frameWidth = 800;
     int frameHeight = 600;
 
-    std::string videoFilename = "spring_motion_video.avi";
-    VideoWriter video(videoFilename, VideoWriter::fourcc('M', 'J', 'P', 'G'), 10, Size(frameWidth, frameHeight));
-
     std::vector<float> timePoints;
     std::vector<float> positionPoints;
     std::vector<float> velocityPoints;
 
     while (t <= T) {
-        Mat frame(frameHeight, frameWidth, CV_8UC3, Scalar(255, 255, 255));
-
         float currentPos = getPos(t, y, v, h);
         float currentVel = getVelocity(t, y, v, h);
-
-        int massX = static_cast<int>(currentPos * 50) + frameWidth / 2;
-        int massY = frameHeight / 2;
-        circle(frame, Point(massX, massY), 10, Scalar(0, 0, 255), -1);
-
-        int fixedPointX = frameWidth / 2;
-        int fixedPointY = frameHeight / 2;
-        circle(frame, Point(fixedPointX, fixedPointY), 5, Scalar(0, 0, 0), -1);
-
-        int springStartX = fixedPointX;
-        int springStartY = fixedPointY;
-        int springEndX = massX;
-        int springEndY = massY;
-        line(frame, Point(springStartX, springStartY), Point(springEndX, springEndY), Scalar(0, 0, 0), 2);
-
-        video.write(frame);
 
         t += h;
         y = currentPos;
@@ -130,6 +112,4 @@ void MechanicalSystem::createPlot(float T) {
     plt::title("Trajectory of the Mass");
     plt::legend();
     plt::save("spring_figure.png");
-
-    video.release();
 }

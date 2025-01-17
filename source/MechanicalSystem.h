@@ -16,11 +16,14 @@ public:
     float getInitialPosition() const;
     float getInitialVelocity() const;
 
-    // Method to update external force (if needed)
+    // Setter methods
+    void setMass(float m);
+    void setStiffness(float k);
+    void setDamping(float c);
+
     void updateExternalForce(float force);
 
-    // Plot method to visualize the spring motion
-    void createPlot(float T);  // Add this line to declare createPlot
+    void createPlot(float T);
 
     // RK4 and ODE solver
     std::vector<double> rk4(std::vector<double> (*f)(float, std::vector<double>, const MechanicalSystem&), 

@@ -3,37 +3,38 @@
 
 import os
 import shutil
+import subprocess
 from SCons.Script import *
 
 # Helper function to get pkg-config flags
 def pkg_config(*packages):
-    cflags = os.popen(f"pkg-config --cflags {' '.join(packages)}").read().strip().split()
-    libs = os.popen(f"pkg-config --libs {' '.join(packages)}").read().strip().split()
-    return cflags, libs
-
-# Define Qt modules you want to include
-qt_modules = [
-    "Qt5Core", "Qt5Gui", "Qt5Widgets", "Qt5Network", "Qt5OpenGL", "Qt5PrintSupport",
-    "Qt5Sql", "Qt5Test", "Qt5Xml", "Qt5Concurrent", "Qt5DBus"
-]
-
-# Get Qt flags from pkg-config for all specified modules
-qt_cflags, qt_libs = pkg_config(*qt_modules)
+    try:
+        cflags = subprocess.check_output(
+            ["pkg-config", "--cflags"] + list(packages), stderr=subprocess.STDOUT
+        ).decode("utf-8").strip().split()
+        libs = subprocess.check_output(
+            ["pkg-config", "--libs"] + list(packages), stderr=subprocess.STDOUT
+        ).decode("utf-8").strip().split()
+        return cflags, libs
+    except subprocess.CalledProcessError as e:
+        print(f"Error running pkg-config for packages: {packages}")
+        print(e.output.decode("utf-8"))
+        return [], []
 
 # Modify paths according to your installation and source code
 eigen_include_path = os.path.expanduser("~/eigen-3.4.0")
 matplotlib_include_path = os.path.expanduser("~")
 opencv_include_path = "/usr/include/opencv4"
 opencv_lib_path = "/usr/lib/aarch64-linux-gnu"
+local_lib = "/usr/local/lib"
 source_dir = "source"
 output_dir = "exe"
 build_dir = os.path.join(source_dir, "build")
 
 # Ensure the output and build directories exist
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-if not os.path.exists(build_dir):
-    os.makedirs(build_dir)
+for directory in [output_dir, build_dir]:
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
 # SCons Environment
 env = Environment(
@@ -43,22 +44,13 @@ env = Environment(
         f"-I{eigen_include_path}",
         f"-I{matplotlib_include_path}",
         f"-I{opencv_include_path}",
-        "-I/usr/include/python3.8",
-        "-I/usr/local/lib/python3.8/dist-packages/numpy/core/include"
-    ] + qt_cflags,  # Append Qt cflags
-    LIBPATH=[opencv_lib_path],
-    LIBS=["opencv_imgproc", "opencv_core", "opencv_highgui", "opencv_videoio", "python3.8"] + qt_libs  # Append Qt libs
+        f"-I/usr/include/GL",
+        "-I/usr/include/python3.10",
+        "-I/usr/local/lib/python3.10/dist-packages/numpy/core/include"
+    ],
+    LIBPATH=[local_lib, opencv_lib_path],    
+    LIBS=["opencv_imgproc", "opencv_core", "opencv_highgui", "opencv_videoio", "python3.10", "GL", "glfw", "GLU", "glut"]  # Add 'glut' here
 )
-
-# Add Qt moc builder to handle headers with Q_OBJECT
-qt_moc = env.WhereIs('moc') or 'moc'
-
-def moc_builder(source, target, env):
-    moc_cmd = f"{qt_moc} -o {target[0]} {source[0]}"
-    os.system(moc_cmd)
-    
-moc = Builder(action=moc_builder, suffix='.moc.cpp', src_suffix='.h')
-env.Append(BUILDERS={'Moc': moc})
 
 # Detect headers with Q_OBJECT and run moc on them
 def process_headers(env, headers):
@@ -91,6 +83,7 @@ def move_object_files(target, source, env):
     for obj_file in object_files:
         obj_path = str(obj_file[0])
         if os.path.exists(obj_path):
+            # Only move if the file exists
             shutil.move(obj_path, os.path.join(build_dir, os.path.basename(obj_path)))
     return 0
 
