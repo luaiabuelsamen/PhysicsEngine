@@ -1,3 +1,4 @@
+    // ...existing code...
 #ifndef MULTIMECHANICALSYSTEM_H
 #define MULTIMECHANICALSYSTEM_H
 
@@ -16,6 +17,12 @@ public:
 
     void simulate(float T, float h);
     void createPlot();
+
+    // Public wrapper for ODE
+    std::vector<float> systemOdePublic(float t, const std::vector<float>& y);
+
+    // Public RK4 step for a single integration step
+    std::vector<float> step(float t, const std::vector<float>& y, float h);
 
 private:
     int numSystems;

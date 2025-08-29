@@ -21,15 +21,26 @@ def pkg_config(*packages):
         print(e.output.decode("utf-8"))
         return [], []
 
+
 # Modify paths according to your installation and source code
 eigen_include_path = os.path.expanduser("~/eigen-3.4.0")
-matplotlib_include_path = os.path.expanduser("~")
+matplotlib_include_path = os.path.join("external", "matplotlib-cpp")
 opencv_include_path = "/usr/include/opencv4"
 opencv_lib_path = "/usr/lib/aarch64-linux-gnu"
 local_lib = "/usr/local/lib"
 source_dir = "source"
 output_dir = "exe"
 build_dir = os.path.join(source_dir, "build")
+
+# Ensure matplotlibcpp.h exists, download if not
+matplotlib_header = os.path.join(matplotlib_include_path, "matplotlibcpp.h")
+if not os.path.exists(matplotlib_header):
+    os.makedirs(matplotlib_include_path, exist_ok=True)
+    import urllib.request
+    url = "https://raw.githubusercontent.com/lava/matplotlib-cpp/master/matplotlibcpp.h"
+    print(f"Downloading {url} to {matplotlib_header}...")
+    urllib.request.urlretrieve(url, matplotlib_header)
+    print("Download complete.")
 
 # Ensure the output and build directories exist
 for directory in [output_dir, build_dir]:

@@ -1,4 +1,15 @@
 #include "MultiMechanicalSystem.h"
+#include <vector>
+// Public RK4 step for a single integration step
+std::vector<float> MultiMechanicalSystem::step(float t, const std::vector<float>& y, float h) {
+    auto result = rk4([this](float t, const std::vector<float>& y) { return systemOde(t, y); }, t, y, h);
+    return result[0];
+}
+
+// Public wrapper for ODE
+std::vector<float> MultiMechanicalSystem::systemOdePublic(float t, const std::vector<float>& y) {
+    return systemOde(t, y);
+}
 #include <cmath>
 #include <matplotlibcpp.h>
 

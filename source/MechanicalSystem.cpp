@@ -1,115 +1,105 @@
+
 #include "MechanicalSystem.h"
 #include <cmath>
 #include <matplotlibcpp.h>
+#include <Eigen/Dense>
 
 namespace plt = matplotlibcpp;
 
-using namespace std;
+// Use the correct namespace for Eigen
+using Eigen::VectorXf;
 
-MechanicalSystem::MechanicalSystem(float m, float c, float k, float x0, float v0)
-    : mass(m), damping(c), springConstant(k), initialPosition(x0), initialVelocity(v0) {}
 
-// Getter methods
+MechanicalSystem::MechanicalSystem(float m, float c, float k, const Vector& x0, const Vector& v0)
+    : mass(m), damping(c), springConstant(k), initialPosition(x0), initialVelocity(v0), externalForce(Vector::Zero(x0.size())), gravity(Vector::Zero(x0.size())) {}
+void MechanicalSystem::setGravity(const Vector& g) {
+    gravity = g;
+}
+
 float MechanicalSystem::getMass() const { return mass; }
 float MechanicalSystem::getDamping() const { return damping; }
 float MechanicalSystem::getSpringConstant() const { return springConstant; }
-float MechanicalSystem::getInitialPosition() const { return initialPosition; }
-float MechanicalSystem::getInitialVelocity() const { return initialVelocity; }
+MechanicalSystem::Vector MechanicalSystem::getInitialPosition() const { return initialPosition; }
+MechanicalSystem::Vector MechanicalSystem::getInitialVelocity() const { return initialVelocity; }
 
-// Setter methods
-void MechanicalSystem::setMass(float m){m = m;}
-void MechanicalSystem::setStiffness(float k){k = k;}
-void MechanicalSystem::setDamping(float c){c = c;}
+void MechanicalSystem::setMass(float m) { mass = m; }
+void MechanicalSystem::setStiffness(float k) { springConstant = k; }
+void MechanicalSystem::setDamping(float c) { damping = c; }
 
-float MechanicalSystem::positionDerivative(float t, float x, float v) const {
+MechanicalSystem::Vector MechanicalSystem::positionDerivative(float /*t*/, const Vector& /*x*/, const Vector& v) const {
     return v;
 }
 
-float MechanicalSystem::velocityDerivative(float t, float x, float v) const {
-    float acceleration = (-getDamping() * v - getSpringConstant() * x) / getMass();
-    return acceleration;
+MechanicalSystem::Vector MechanicalSystem::velocityDerivative(float /*t*/, const Vector& x, const Vector& v) const {
+    // F = -kx - cv + externalForce + m*gravity
+    return (-getSpringConstant() * x - getDamping() * v + externalForce + mass * gravity) / getMass();
 }
 
-float MechanicalSystem::getVelocity(float t, float x, float v, float h) {
-    std::vector<double> y0 = rk4(systemOde, t, {x, v}, h, *this);
-    return y0[1];
+MechanicalSystem::Vector MechanicalSystem::getVelocity(float t, const Vector& x, const Vector& v, float h) {
+    Vector y0(x.size() + v.size());
+    y0 << x, v;
+    Vector result = rk4(systemOde, t, y0, h, *this);
+    return result.tail(v.size());
 }
 
-float MechanicalSystem::getPos(float t, float x, float v, float h) {
-    std::vector<double> y0 = rk4(systemOde, t, {x, v}, h, *this);
-    return y0[0];
+MechanicalSystem::Vector MechanicalSystem::getPos(float t, const Vector& x, const Vector& v, float h) {
+    Vector y0(x.size() + v.size());
+    y0 << x, v;
+    Vector result = rk4(systemOde, t, y0, h, *this);
+    return result.head(x.size());
 }
 
-void MechanicalSystem::updateExternalForce(float force) {
-    // Implement external force logic if needed
+void MechanicalSystem::updateExternalForce(const Vector& force) {
+    externalForce = force;
 }
 
-std::vector<double> MechanicalSystem::systemOde(float t, std::vector<double> y, const MechanicalSystem& system) {
-    return {system.positionDerivative(t, y[0], y[1]), system.velocityDerivative(t, y[0], y[1])};
+MechanicalSystem::Vector MechanicalSystem::systemOde(float t, const Vector& y, const MechanicalSystem& system) {
+    int n = y.size() / 2;
+    Vector x = y.head(n);
+    Vector v = y.tail(n);
+    Vector dx = system.positionDerivative(t, x, v);
+    Vector dv = system.velocityDerivative(t, x, v);
+    Vector dydt(y.size());
+    dydt << dx, dv;
+    return dydt;
 }
 
-std::vector<double> MechanicalSystem::rk4(std::vector<double> (*f)(float, std::vector<double>, const MechanicalSystem&), float t, const std::vector<double>& y, float h, const MechanicalSystem& system) {
-    std::vector<double> k1 = f(t, y, system);
-    std::vector<double> k1_scaled;
-    k1_scaled.reserve(y.size());
-    for (size_t i = 0; i < y.size(); ++i) {
-        k1_scaled.push_back(k1[i] * h / 2 + y[i]);
-    }
-    std::vector<double> k2 = f(t + h / 2, k1_scaled, system);
-
-    std::vector<double> k2_scaled;
-    k2_scaled.reserve(y.size());
-    for (size_t i = 0; i < y.size(); ++i) {
-        k2_scaled.push_back(k2[i] * h / 2 + y[i]);
-    }
-    std::vector<double> k3 = f(t + h / 2, k2_scaled, system);
-
-    std::vector<double> k3_scaled;
-    k3_scaled.reserve(y.size());
-    for (size_t i = 0; i < y.size(); ++i) {
-        k3_scaled.push_back(k3[i] * h + y[i]);
-    }
-    std::vector<double> k4 = f(t + h, k3_scaled, system);
-
-    std::vector<double> y1;
-    for (size_t i = 0; i < y.size(); ++i) {
-        y1.push_back(y[i] + h / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
-    }
-
-    return y1;
+MechanicalSystem::Vector MechanicalSystem::rk4(Vector (*f)(float, const Vector&, const MechanicalSystem&), float t, const Vector& y, float h, const MechanicalSystem& system) {
+    Vector k1 = f(t, y, system);
+    Vector k2 = f(t + h / 2, y + h / 2 * k1, system);
+    Vector k3 = f(t + h / 2, y + h / 2 * k2, system);
+    Vector k4 = f(t + h, y + h * k3, system);
+    return y + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4);
 }
 
 void MechanicalSystem::createPlot(float T) {
-    // Initial conditions
     float t = 0.0;
-    float y = initialPosition;
-    float v = initialVelocity;
     float h = 0.1;
-
-    int frameWidth = 800;
-    int frameHeight = 600;
+    Vector y = initialPosition;
+    Vector v = initialVelocity;
 
     std::vector<float> timePoints;
     std::vector<float> positionPoints;
     std::vector<float> velocityPoints;
 
     while (t <= T) {
-        float currentPos = getPos(t, y, v, h);
-        float currentVel = getVelocity(t, y, v, h);
+        Vector currentPos = getPos(t, y, v, h);
+        Vector currentVel = getVelocity(t, y, v, h);
 
         t += h;
         y = currentPos;
         v = currentVel;
-        positionPoints.push_back(y);
-        velocityPoints.push_back(v);
+        // For plotting, only plot the first dimension
+        positionPoints.push_back(currentPos[0]);
+        velocityPoints.push_back(currentVel[0]);
         timePoints.push_back(t);
     }
 
-    plt::plot(timePoints, positionPoints, {{"label", "Position"}});
-    plt::plot(timePoints, velocityPoints, {{"label", "Velocity"}});
+    plt::plot(timePoints, positionPoints, {{"label", "Position (dim 0)"}});
+    plt::plot(timePoints, velocityPoints, {{"label", "Velocity (dim 0)"}});
     plt::xlabel("Time");
     plt::ylabel("Value");
-    plt::title("Trajectory of the Mass");
+    plt::title("Trajectory of the Mass (First Dimension)");
     plt::legend();
     plt::save("spring_figure.png");
 }
