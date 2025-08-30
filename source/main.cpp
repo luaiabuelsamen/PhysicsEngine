@@ -1,89 +1,26 @@
-#include "MultiMechanicalSystem.h"
-#include <GLFW/glfw3.h>
-// Forward declarations for mouse event handlers (GLFWwindow is now defined)
-void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
-void cursorPosCallback(GLFWwindow* window, double xpos, double ypos);
-
-// Forward declaration for screenToWorldX
-float screenToWorldX(double screenX, int windowWidth);
 #include <GL/glut.h>
+#include <GLFW/glfw3.h>
 #include <cmath>
 #include <vector>
 #include <iostream>
 #include <chrono>
 #include <string>
 #include <sstream>
+#include <iomanip>
+#include <utility>
+#include <algorithm>
 #include <Eigen/Dense>
 
-#include <iomanip>
+#include "MultiMechanicalSystem.h"
+#include "cuda_mass_spring.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-// Multi-DOF 1D spring-mass system parameters
-
-constexpr int numMasses = 3;
-std::vector<float> masses(numMasses, 1.0f);
-std::vector<float> dampings(numMasses, 0.1f);
-std::vector<float> springConstants(numMasses, 1.0f);
-std::vector<float> initialPositions = {-0.9f, -0.3f, 0.4f};
-std::vector<float> initialVelocities(numMasses, 0.0f);
-// Couplings: connect mass 0-1, 1-2
-std::vector<std::pair<int, int>> couplings = { {0,1}, {1,2} };
-std::vector<float> couplingConstants = {1.0f, 1.0f};
-// Wall spring constant (same as others for now)
-float wallSpringConstant = 1.0f;
-float wallPosition = -1.0f;
-
-MultiMechanicalSystem multiSystem(masses, dampings, springConstants, initialPositions, initialVelocities, couplings, couplingConstants);
-std::vector<float> positions = initialPositions;
-std::vector<float> velocities = initialVelocities;
-float simTime = 0.0f;
-bool oscillationStarted = true;
-int draggedBlock = -1; // index of block being dragged, -1 if none
-float dragOffset = 0.0f;
-double lastMouseX = 0.0;
-// Mouse event handlers for dragging blocks
-
-// --- Place these at the end of the file, after main() ---
-
-void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
-    double mouseX, mouseY;
-    glfwGetCursorPos(window, &mouseX, &mouseY);
-    int width, height;
-    glfwGetWindowSize(window, &width, &height);
-    float mouseWorldX = screenToWorldX(mouseX, width);
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        if (action == GLFW_PRESS) {
-            // Check if mouse is over any block
-            for (int i = 0; i < numMasses; ++i) {
-                if (std::abs(mouseWorldX - positions[i]) < 0.07f) {
-                    draggedBlock = i;
-                    dragOffset = positions[i] - mouseWorldX;
-                    lastMouseX = mouseWorldX;
-                    break;
-                }
-            }
-        } else if (action == GLFW_RELEASE && draggedBlock != -1) {
-            // Set velocity based on drag
-            velocities[draggedBlock] = (mouseWorldX - lastMouseX) / 0.016f;
-            draggedBlock = -1;
-        }
-    }
-}
-
-void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
-    if (draggedBlock != -1) {
-        int width, height;
-        glfwGetWindowSize(window, &width, &height);
-        float mouseWorldX = screenToWorldX(xpos, width);
-        positions[draggedBlock] = mouseWorldX + dragOffset;
-        lastMouseX = mouseWorldX;
-    }
-}
-
-// Function declarations
+// Forward declarations
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+void cursorPosCallback(GLFWwindow* window, double xpos, double ypos);
 float screenToWorldX(double screenX, int windowWidth);
 bool isMouseOverCube(float mouseWorldX, float cubeWorldX);
 bool isMouseOverCube(float mouseWorldX, const Eigen::VectorXf& cubeWorldX);
@@ -92,6 +29,72 @@ void drawSpring(float x1, float x2, float y = 0.0f);
 void drawGrid(float spacing, int numLines);
 void drawText(const std::string& text, float x, float y, float scale = 1.0f);
 
+#ifdef USE_CUDA
+// Helper to call CUDA coupled mass-spring kernel for one step
+void runCudaCoupledMassSpring(
+    std::vector<float>& positions,
+    std::vector<float>& velocities,
+    const std::vector<float>& initialPositions,
+    const std::vector<float>& initialVelocities,
+    const std::vector<float>& masses,
+    const std::vector<float>& dampings,
+    const std::vector<float>& springConstants,
+    const std::vector<std::pair<int, int>>& couplings,
+    const std::vector<float>& couplingConstants,
+    int steps, float h)
+{
+    int numMasses = positions.size();
+    int numCouplings = couplings.size();
+    std::vector<int> couplingA(numCouplings), couplingB(numCouplings);
+    for (int i = 0; i < numCouplings; ++i) {
+        couplingA[i] = couplings[i].first;
+        couplingB[i] = couplings[i].second;
+    }
+    cuda_coupled_mass_spring(
+        positions.data(), velocities.data(),
+        initialPositions.data(), initialVelocities.data(),
+        masses.data(), dampings.data(), springConstants.data(),
+        couplingA.data(), couplingB.data(), couplingConstants.data(), numCouplings,
+        numMasses, steps, h);
+}
+#else
+// Stub for non-CUDA builds
+void runCudaCoupledMassSpring(
+    std::vector<float>&, std::vector<float>&,
+    const std::vector<float>&, const std::vector<float>&,
+    const std::vector<float>&, const std::vector<float>&, const std::vector<float>&,
+    const std::vector<std::pair<int, int>>&, const std::vector<float>&,
+    int, float)
+{
+    // No-op in non-CUDA build
+}
+#endif
+
+// Multi-DOF 1D spring-mass system parameters
+constexpr int numMasses = 3;
+std::vector<float> masses(numMasses, 1.0f);
+std::vector<float> dampings(numMasses, 0.1f);
+std::vector<float> springConstants(numMasses, 1.0f);
+std::vector<float> initialPositions = {-0.9f, -0.3f, 0.4f};
+std::vector<float> initialVelocities(numMasses, 0.0f);
+
+// Couplings: connect mass 0-1, 1-2
+std::vector<std::pair<int, int>> couplings = { {0,1}, {1,2} };
+std::vector<float> couplingConstants = {1.0f, 1.0f};
+
+// Wall spring constant
+float wallSpringConstant = 1.0f;
+float wallPosition = -1.0f;
+
+// Global variables
+MultiMechanicalSystem multiSystem(masses, dampings, springConstants, initialPositions, initialVelocities, couplings, couplingConstants);
+std::vector<float> positions = initialPositions;
+std::vector<float> velocities = initialVelocities;
+float simTime = 0.0f;
+bool oscillationStarted = true;
+int draggedBlock = -1; // index of block being dragged, -1 if none
+float dragOffset = 0.0f;
+double lastMouseX = 0.0;
 
 // Function implementations
 float screenToWorldX(double screenX, int windowWidth) {
@@ -174,9 +177,44 @@ void drawText(const std::string& text, float x, float y, float scale) {
     glPopMatrix();
 }
 
+// Mouse event handlers
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+    double mouseX, mouseY;
+    glfwGetCursorPos(window, &mouseX, &mouseY);
+    int width, height;
+    glfwGetWindowSize(window, &width, &height);
+    float mouseWorldX = screenToWorldX(mouseX, width);
+    
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        if (action == GLFW_PRESS) {
+            // Check if mouse is over any block
+            for (int i = 0; i < numMasses; ++i) {
+                if (std::abs(mouseWorldX - positions[i]) < 0.07f) {
+                    draggedBlock = i;
+                    dragOffset = positions[i] - mouseWorldX;
+                    lastMouseX = mouseWorldX;
+                    break;
+                }
+            }
+        } else if (action == GLFW_RELEASE && draggedBlock != -1) {
+            // Set velocity based on drag
+            velocities[draggedBlock] = (mouseWorldX - lastMouseX) / 0.016f;
+            draggedBlock = -1;
+        }
+    }
+}
+
+void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
+    if (draggedBlock != -1) {
+        int width, height;
+        glfwGetWindowSize(window, &width, &height);
+        float mouseWorldX = screenToWorldX(xpos, width);
+        positions[draggedBlock] = mouseWorldX + dragOffset;
+        lastMouseX = mouseWorldX;
+    }
+}
 
 int main() {
-
     int argc = 1;
     char* argv[] = {(char*)"program"};
     glutInit(&argc, argv);
@@ -193,6 +231,7 @@ int main() {
     }
 
     glfwMakeContextCurrent(window);
+    
     // Set up mouse callbacks (after window is created)
     glfwSetMouseButtonCallback(window, mouseButtonCallback);
     glfwSetCursorPosCallback(window, cursorPosCallback);
@@ -211,6 +250,7 @@ int main() {
     std::cout << "Controls:" << std::endl;
     std::cout << "- Press Space to start/stop oscillation" << std::endl;
     std::cout << "- Press R to reset" << std::endl;
+    std::cout << "- Click and drag masses to interact" << std::endl;
 
     float timeStep = 0.016f; // ~60 FPS
 
@@ -226,12 +266,32 @@ int main() {
             // If dragging, pause simulation for that block
             std::vector<bool> isDragged(numMasses, false);
             if (draggedBlock != -1) isDragged[draggedBlock] = true;
+
+
+#ifdef USE_CUDA
+            // CUDA step for internal springs
+            std::vector<float> newPositions = positions;
+            std::vector<float> newVelocities = velocities;
+            runCudaCoupledMassSpring(
+                newPositions, newVelocities,
+                positions, velocities,
+                masses, dampings, springConstants,
+                couplings, couplingConstants,
+                1, timeStep);
+            // Update positions and velocities for non-dragged masses
+            for (int i = 0; i < numMasses; ++i) {
+                if (!isDragged[i]) {
+                    positions[i] = newPositions[i];
+                    velocities[i] = newVelocities[i];
+                }
+            }
+#else
+            // CPU RK4 step for internal springs
             std::vector<float> y(2 * numMasses);
             for (int i = 0; i < numMasses; ++i) {
                 y[2 * i] = positions[i];
                 y[2 * i + 1] = velocities[i];
             }
-            // RK4 step for internal springs
             y = multiSystem.step(simTime, y, timeStep);
             for (int i = 0; i < numMasses; ++i) {
                 if (!isDragged[i]) {
@@ -239,34 +299,47 @@ int main() {
                     velocities[i] = y[2 * i + 1];
                 }
             }
-            // Find the leftmost box (smallest x)
+#endif
+
+            // Find the leftmost mass (smallest x coordinate)
             int leftIdx = 0;
-            float minX = positions[0];
             for (int i = 1; i < numMasses; ++i) {
-                if (positions[i] < minX) {
-                    minX = positions[i];
+                if (positions[i] < positions[leftIdx]) {
                     leftIdx = i;
                 }
             }
-            float xLeft = positions[leftIdx];
-            float vLeft = velocities[leftIdx];
-            float forceWall = -wallSpringConstant * (xLeft - wallPosition) - dampings[leftIdx] * vLeft;
-            float aWall = forceWall / masses[leftIdx];
-            velocities[leftIdx] += aWall * timeStep;
-            positions[leftIdx] += velocities[leftIdx] * timeStep;
 
-            // Collision handling: prevent overlap and swap velocities if blocks overlap
+            // Apply wall force to leftmost mass
+            if (!isDragged[leftIdx]) {
+                float xLeft = positions[leftIdx];
+                float vLeft = velocities[leftIdx];
+                float forceWall = -wallSpringConstant * (xLeft - wallPosition) - dampings[leftIdx] * vLeft;
+                float aWall = forceWall / masses[leftIdx];
+                velocities[leftIdx] += aWall * timeStep;
+                positions[leftIdx] += velocities[leftIdx] * timeStep;
+            }
+
+            // Collision handling: prevent overlap between adjacent masses
             float minDist = 0.11f; // slightly more than twice the mass size (0.05)
             for (int i = 0; i < numMasses - 1; ++i) {
-                if (positions[i] - positions[i+1] < minDist) {
-                    // Move them apart
-                    float overlap = minDist - (positions[i] - positions[i+1]);
-                    positions[i] += 0.5f * overlap;
-                    positions[i+1] -= 0.5f * overlap;
-                    // Elastic collision: swap velocities
-                    std::swap(velocities[i], velocities[i+1]);
+                for (int j = i + 1; j < numMasses; ++j) {
+                    float dist = std::abs(positions[i] - positions[j]);
+                    if (dist < minDist) {
+                        // Calculate overlap and separate masses
+                        float overlap = minDist - dist;
+                        float direction = (positions[i] > positions[j]) ? 1.0f : -1.0f;
+                        
+                        if (!isDragged[i]) positions[i] += 0.5f * overlap * direction;
+                        if (!isDragged[j]) positions[j] -= 0.5f * overlap * direction;
+                        
+                        // Elastic collision: exchange velocities
+                        if (!isDragged[i] && !isDragged[j]) {
+                            std::swap(velocities[i], velocities[j]);
+                        }
+                    }
                 }
             }
+
             simTime += timeStep;
         }
 
@@ -277,40 +350,53 @@ int main() {
         glVertex2f(wallPosition, -0.3f);
         glVertex2f(wallPosition, 0.3f);
         glEnd();
-        // Draw spring from wall to leftmost box
+
+        // Draw spring from wall to leftmost mass
         int leftIdx = 0;
-        float minX = positions[0];
         for (int i = 1; i < numMasses; ++i) {
-            if (positions[i] < minX) {
-                minX = positions[i];
+            if (positions[i] < positions[leftIdx]) {
                 leftIdx = i;
             }
         }
         drawSpring(wallPosition, positions[leftIdx], 0.0f);
-        // Draw springs between boxes
+
+        // Draw springs between coupled masses
         for (size_t i = 0; i < couplings.size(); ++i) {
             int idxA = couplings[i].first;
             int idxB = couplings[i].second;
             drawSpring(positions[idxA], positions[idxB], 0.0f);
         }
+
         // Draw masses
         for (int i = 0; i < numMasses; ++i) {
-            drawMass(positions[i], 0.0f, false);
+            bool isHovered = (draggedBlock == i);
+            drawMass(positions[i], 0.0f, isHovered);
         }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
 
         // Handle keyboard input
-        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
-            oscillationStarted = true;
+        static bool spacePressed = false;
+        static bool rPressed = false;
+        
+        bool currentSpaceState = (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+        bool currentRState = (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS);
+        
+        if (currentSpaceState && !spacePressed) {
+            oscillationStarted = !oscillationStarted;
         }
-        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
+        
+        if (currentRState && !rPressed) {
             positions = initialPositions;
             velocities = initialVelocities;
             simTime = 0.0f;
             oscillationStarted = false;
+            draggedBlock = -1;
         }
+        
+        spacePressed = currentSpaceState;
+        rPressed = currentRState;
     }
 
     glfwDestroyWindow(window);

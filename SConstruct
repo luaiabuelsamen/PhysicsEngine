@@ -1,10 +1,16 @@
+# Add option to enable/disable CUDA
+AddOption('--use-cuda', dest='use_cuda', action='store_true', default=False, help='Enable CUDA acceleration')
+use_cuda = GetOption('use_cuda')
 #!/usr/bin/env python
 # coding: utf-8
+
 
 import os
 import shutil
 import subprocess
 from SCons.Script import *
+from glob import glob as py_glob
+
 
 # Helper function to get pkg-config flags
 def pkg_config(*packages):
@@ -48,6 +54,7 @@ for directory in [output_dir, build_dir]:
         os.makedirs(directory)
 
 # SCons Environment
+cuda_lib_path = "/usr/local/cuda/lib64"
 env = Environment(
     CXX="g++",
     CXXFLAGS=[
@@ -59,9 +66,32 @@ env = Environment(
         "-I/usr/include/python3.10",
         "-I/usr/local/lib/python3.10/dist-packages/numpy/core/include"
     ],
-    LIBPATH=[local_lib, opencv_lib_path],    
-    LIBS=["opencv_imgproc", "opencv_core", "opencv_highgui", "opencv_videoio", "python3.10", "GL", "glfw", "GLU", "glut"]  # Add 'glut' here
+    LIBPATH=[local_lib, opencv_lib_path] + ([cuda_lib_path] if use_cuda else []),
+    LIBS=["opencv_imgproc", "opencv_core", "opencv_highgui", "opencv_videoio", "python3.10", "GL", "glfw", "GLU", "glut"] + (["cudart"] if use_cuda else [])
 )
+
+if use_cuda:
+    env.Append(CPPDEFINES=["USE_CUDA"])
+    env.Append(CXXFLAGS=["-O3"])
+
+
+# CUDA integration
+cuda_tool_name = 'cuda_scons_tool'
+if os.path.exists(os.path.join(source_dir, cuda_tool_name + '.py')):
+    env.Tool(cuda_tool_name, toolpath=[source_dir])
+
+cuda_objects = []
+if use_cuda:
+    cuda_sources = env.Glob(os.path.join(source_dir, "*.cu"))
+    if cuda_sources:
+        cuda_env = env.Clone()
+        cuda_env['NVCCFLAGS'] = ["-O3", "-arch=sm_52", "-DUSE_CUDA"]
+        # Remove any CPPDEFINES from cuda_env to avoid SCons passing USE_CUDA as a positional argument
+        if 'CPPDEFINES' in cuda_env:
+            del cuda_env['CPPDEFINES']
+        for cu in cuda_sources:
+            cu_obj = cuda_env.CudaObject(str(cu))
+            cuda_objects.append(cu_obj)
 
 # Detect headers with Q_OBJECT and run moc on them
 def process_headers(env, headers):
@@ -75,8 +105,8 @@ def process_headers(env, headers):
     return moc_files
 
 # Get source and header files
-source_files = Glob(os.path.join(source_dir, "*.cpp"))
-header_files = Glob(os.path.join(source_dir, "*.h"))
+source_files = env.Glob(os.path.join(source_dir, "*.cpp"))
+header_files = env.Glob(os.path.join(source_dir, "*.h"))
 
 # Run moc on headers with Q_OBJECT
 moc_files = process_headers(env, header_files)
@@ -84,8 +114,8 @@ moc_files = process_headers(env, header_files)
 # Compile each source file to an object file
 object_files = [env.Object(src) for src in source_files + moc_files]
 
-# Link all object files into the final executable in the output directory
-program = env.Program(target=os.path.join(output_dir, 'engine.exe'), source=object_files)
+# Link all object files (including CUDA objects if enabled) into the final executable in the output directory
+program = env.Program(target=os.path.join(output_dir, 'engine.exe'), source=object_files + cuda_objects)
 
 # Post-build action to move .o files to build_dir
 def move_object_files(target, source, env):

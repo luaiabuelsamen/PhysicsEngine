@@ -3,3 +3,4 @@ exe/*
 *.dblite
 *.o
 venv/
+__pycache__/
