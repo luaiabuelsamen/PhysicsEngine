@@ -2,6 +2,10 @@
 
 A massively parallel rigid body dynamics simulator built with C++ and CUDA. Supports 100,000+ simultaneous objects with up to 50x speedup over CPU through CUDA kernel optimization, spatial hash broadphase, and memory coalescing.
 
+![Rigid Body Simulation](static/rigid_body_sim.gif)
+
+*200 rigid bodies with gravity, sphere-sphere collisions, and impulse-based resolution. Color indicates velocity: teal (slow) to red (fast).*
+
 ## Architecture
 
 ### GPU Pipeline (per simulation step)
@@ -83,6 +87,7 @@ source/
   cpu_rigid_body.cpp/h      # CPU reference with spatial hash (for comparison)
   cpu_rigid_body_naive.cpp/h # CPU O(n^2) brute-force baseline
   benchmark.cpp             # Benchmark harness with CPU vs GPU comparison
+  visualize.cpp             # 2D renderer - outputs GIF via ffmpeg pipe
   main.cpp                  # Interactive spring-mass visualization (OpenGL)
   MechanicalSystem.cpp/h    # Single-DOF mechanical system solver
   MultiMechanicalSystem.cpp/h # Multi-DOF coupled system solver

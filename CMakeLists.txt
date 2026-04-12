@@ -35,3 +35,16 @@ target_link_libraries(benchmark PRIVATE cudart)
 set_target_properties(benchmark PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
+
+# Visualization executable (renders GIF via ffmpeg pipe)
+add_executable(visualize
+    source/visualize.cpp
+    source/cpu_rigid_body.cpp
+    source/cuda_rigid_body.cu
+)
+
+target_include_directories(visualize PRIVATE source)
+target_link_libraries(visualize PRIVATE cudart)
+set_target_properties(visualize PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
