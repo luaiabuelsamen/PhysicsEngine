@@ -1,53 +1,98 @@
-# PhysicsEngine - Simulating Mechanical Systems with C++
+# GPU-Accelerated Physics Engine
 
-The **PhysicsEngine** is a C++ program that simulates mechanical systems using numerical methods. It provides a flexible framework to model and analyze multi-degree-of-freedom systems involving masses, springs, dampers, and external forces.
+A massively parallel rigid body dynamics simulator built with C++ and CUDA. Supports 100,000+ simultaneous objects with up to 50x speedup over CPU through CUDA kernel optimization, spatial hash broadphase, and memory coalescing.
 
-## Installation
+## Architecture
 
-To run the **PhysicsEngine**, follow these steps:
+### GPU Pipeline (per simulation step)
 
-1. Start the development envrionment by running the docker container:
-   ```
-   ./runDocker
-   ```
+1. **Semi-implicit Euler Integration** - Each CUDA thread updates one body's velocity and position
+2. **Spatial Hash Computation** - Maps each body to a 3D grid cell, computed in parallel
+3. **Radix Sort** - Bodies sorted by grid cell hash using Thrust (O(n) on GPU)
+4. **Cell Boundary Detection** - Identifies start/end of each cell in sorted array using shared memory
+5. **Collision Detection & Resolution** - Each thread checks 27 neighboring cells for sphere-sphere collisions, applies impulse-based response with positional correction
 
-2. Build the executable by running the build script:
-   ```
-   scons
-   ```
+### Key Optimizations
 
-3. Navigate to the `exe` directory and run the executable:
-   ```
-   cd exe
-   ./engine.exe
-   ```
+- **Structure-of-Arrays (SoA) layout**: Positions, velocities, and properties stored as separate contiguous arrays for coalesced GPU memory access. Threads in a warp access adjacent memory locations, maximizing bandwidth.
+- **Spatial hash broadphase**: O(n) collision detection using uniform grid. Each body only checks neighboring cells instead of all-pairs O(n²).
+- **Persistent GPU buffers**: Data stays on GPU across simulation steps - host-device transfers only at start and end.
+- **Fast math intrinsics**: `rsqrtf()` for reciprocal square root, `__float2int_rd()` for float-to-int conversion.
+- **Shared memory**: Cell boundary kernel uses shared memory to reduce global memory reads.
+- **`__launch_bounds__`**: Collision kernel uses launch bounds for optimal register allocation.
 
-## Usage
-Physics engine for simulation of mechanical systems with C++
+## Benchmark Results
 
-![Example System](static/Three-degree-of-freedom-DOF-system-consisting-of-spring-and-damper.ppm)
+Tested on NVIDIA Jetson Orin NX (1024 CUDA cores, Ampere architecture):
 
-![Example plot](static/spring_figure.png)
+```
+Bodies    Steps   CPU Naive     CPU Opt       GPU (ms)      vs Naive      vs Opt
+----------------------------------------------------------------------------------------
+1,000     50      95 ms         29 ms         23 ms         4x            1x
+5,000     50      2,349 ms      160 ms        35 ms         66x           4x
+10,000    50      9,377 ms      335 ms        77 ms         121x          4x
+25,000    50      58,640 ms     897 ms        82 ms         714x          10x
+50,000    50      234,426 ms    1,871 ms      149 ms        1,573x        12x
+100,000   50      ---           4,222 ms      350 ms        ---           12x
+500,000   10      ---           ---           463 ms        ---           ---
+```
 
-![Example video](static/demo.gif)
+- **CPU Naive**: Single-threaded O(n²) brute-force collision detection
+- **CPU Opt**: Single-threaded with spatial hash broadphase
+- **GPU**: CUDA with spatial hash + parallel narrowphase
 
-The program demonstrates the simulation of a 3-degree-of-freedom (3-DOF) mechanical system consisting of masses, springs, dampers, and external forces. The coupling between the individual carts is defined through a coupling matrix. An impulse force is applied to the first cart at a specific time.
+## Building
 
-The program outputs the combined positions and velocities of the system, as well as the mass, damping, and stiffness matrices. Additionally, it calculates and displays the natural frequencies of the system.
+### Prerequisites
 
-Feel free to modify the parameters, coupling matrix, and force application in the `main.cpp` file to explore different scenarios and systems.
+- CUDA Toolkit 11.0+ (tested with 12.6)
+- CMake 3.18+
+- g++ with C++14 support
 
-## Contributing
+### Build
 
-Contributions to the **PhysicsEngine** project are welcome! You can contribute by opening issues for bug reports or feature requests, or by submitting pull requests with enhancements.
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_CUDA_ARCHITECTURES=87  # adjust for your GPU
+make -j$(nproc)
+```
+
+### Run Benchmark
+
+```bash
+# Full suite
+./benchmark
+
+# Custom: ./benchmark <num_bodies> [num_steps] [run_naive] [run_optimized_cpu]
+./benchmark 100000 50 0 1
+```
+
+### Docker
+
+```bash
+docker build -t physics-engine .
+docker run --gpus all physics-engine
+```
+
+## Project Structure
+
+```
+source/
+  RigidBody.h              # SoA data structures for GPU memory coalescing
+  cuda_rigid_body.cu/h      # CUDA kernels: integration, spatial hash, collision
+  cpu_rigid_body.cpp/h      # CPU reference with spatial hash (for comparison)
+  cpu_rigid_body_naive.cpp/h # CPU O(n^2) brute-force baseline
+  benchmark.cpp             # Benchmark harness with CPU vs GPU comparison
+  main.cpp                  # Interactive spring-mass visualization (OpenGL)
+  MechanicalSystem.cpp/h    # Single-DOF mechanical system solver
+  MultiMechanicalSystem.cpp/h # Multi-DOF coupled system solver
+  cuda_mass_spring.cu/h     # CUDA kernel for mass-spring systems
+  ode.h                     # RK4 ODE solver
+CMakeLists.txt              # Build system for rigid body engine
+SConstruct                  # Build system for spring-mass visualization
+Dockerfile                  # CUDA-enabled container
+```
 
 ## License
 
-This project is licensed under the MIT License. You can find more details in the [LICENSE](LICENSE) file.
-
-## Acknowledgments
-
-The **PhysicsEngine** project is inspired by the need to simulate and analyze mechanical systems in a flexible and easy-to-use manner. It utilizes C++ and numerical methods to provide insights into the behavior of complex systems.
-
-
-Enjoy simulating mechanical systems with the **PhysicsEngine**!
+MIT License. See [LICENSE](LICENSE) for details.
