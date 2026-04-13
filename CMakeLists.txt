@@ -48,3 +48,9 @@ target_link_libraries(visualize PRIVATE cudart)
 set_target_properties(visualize PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
+
+# Double pendulum visualization (CPU only, no CUDA needed)
+add_executable(visualize_pendulum
+    source/visualize_pendulum.cpp
+)
+target_include_directories(visualize_pendulum PRIVATE source)
