@@ -6,9 +6,13 @@ A massively parallel rigid body dynamics simulator built with C++ and CUDA. Supp
 
 *200 rigid bodies with gravity, sphere-sphere collisions, and impulse-based resolution. Color indicates velocity: teal (slow) to red (fast).*
 
-![Double Pendulum Chaos](static/double_pendulum.gif)
+![Particle Pour](static/particle_pour.gif)
 
-*5 double pendulums with nearly identical initial conditions (0.01 rad apart) diverge chaotically. RK4 integration.*
+*2,000 rigid bodies pouring from two streams with gravity and collisions, simulated on GPU.*
+
+![Pendulum Chaos](static/pendulum_chaos.gif)
+
+*500 double pendulums (0.02 rad spread) integrated in parallel on CUDA, showing chaotic divergence with rainbow trails.*
 
 ## Architecture
 
@@ -92,7 +96,9 @@ source/
   cpu_rigid_body_naive.cpp/h # CPU O(n^2) brute-force baseline
   benchmark.cpp             # Benchmark harness with CPU vs GPU comparison
   visualize.cpp             # 2D rigid body renderer - outputs GIF via ffmpeg
-  visualize_pendulum.cpp    # Double pendulum chaos visualization
+  visualize_pendulum.cpp    # GPU particle pour visualization
+  visualize_chaos.cpp       # CUDA-parallel double pendulum chaos
+  cuda_pendulum.cu          # CUDA kernel for parallel pendulum RK4 integration
   main.cpp                  # Interactive spring-mass visualization (OpenGL)
   MechanicalSystem.cpp/h    # Single-DOF mechanical system solver
   MultiMechanicalSystem.cpp/h # Multi-DOF coupled system solver

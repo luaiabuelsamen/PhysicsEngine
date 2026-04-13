@@ -49,8 +49,25 @@ set_target_properties(visualize PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-# Double pendulum visualization (CPU only, no CUDA needed)
-add_executable(visualize_pendulum
+# Particle pour visualization (GPU-accelerated)
+add_executable(visualize_pour
     source/visualize_pendulum.cpp
+    source/cpu_rigid_body.cpp
+    source/cuda_rigid_body.cu
 )
-target_include_directories(visualize_pendulum PRIVATE source)
+target_include_directories(visualize_pour PRIVATE source)
+target_link_libraries(visualize_pour PRIVATE cudart)
+set_target_properties(visualize_pour PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+# Double pendulum chaos visualization (CUDA-parallel RK4)
+add_executable(visualize_chaos
+    source/visualize_chaos.cpp
+    source/cuda_pendulum.cu
+)
+target_include_directories(visualize_chaos PRIVATE source)
+target_link_libraries(visualize_chaos PRIVATE cudart)
+set_target_properties(visualize_chaos PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
