@@ -1,6 +1,6 @@
 # GPU-Accelerated Physics Engine
 
-A massively parallel rigid body dynamics simulator built with C++ and CUDA. Supports 100,000+ simultaneous objects with up to 50x speedup over CPU through CUDA kernel optimization, spatial hash broadphase, and memory coalescing.
+A massively parallel rigid body dynamics simulator built with C++ and CUDA. Supports 100,000+ simultaneous objects. At 100,000 bodies it runs **12x faster than an optimized, algorithmically-matched single-threaded CPU implementation** (350 ms vs 4,222 ms), and ~1,570x faster than a naive O(n^2) baseline at 50,000 bodies. Both baselines are in the benchmark table below.
 
 ![Rigid Body Simulation](static/rigid_body_sim.gif)
 
