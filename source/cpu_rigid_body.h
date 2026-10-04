@@ -1,8 +1,10 @@
 #pragma once
 
-// CPU single-threaded rigid body simulation (reference implementation for benchmarking).
-// Identical physics to the GPU version: semi-implicit Euler + spatial hash broadphase +
-// sphere-sphere collision with impulse-based resolution.
+// Hand-written single-threaded CPU baseline for the benchmark.
+// Same integrator, spatial hash broadphase and contact model as libphys, but it
+// visits each pair once and updates both bodies in place (Gauss-Seidel style),
+// which is the fastest way to do it on one core. Its trajectories therefore
+// differ slightly from libphys; libphys's own CPU backend is the exact reference.
 
 void cpu_rigid_body_simulate(
     float* px, float* py, float* pz,

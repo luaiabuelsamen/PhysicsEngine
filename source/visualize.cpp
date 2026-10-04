@@ -10,9 +10,7 @@
 #include <vector>
 #include <algorithm>
 
-#include "RigidBody.h"
-#include "cpu_rigid_body.h"
-#include "cuda_rigid_body.h"
+#include "phys/phys.h"
 
 struct Color { uint8_t r, g, b; };
 
@@ -94,32 +92,36 @@ int main() {
     float domain_y = 15.0f;  // matches aspect ratio
     float min_radius = 0.2f;
     float max_radius = 0.45f;
-    float cell_size = max_radius * 2.0f;
-    int grid_dim = (int)ceilf(std::max(domain_x, domain_y) / cell_size);
 
     srand(123);
 
-    // Initialize bodies in 2D (z = domain/2, vz = 0)
-    RigidBodySystem sys;
-    sys.allocate(NUM_BODIES);
-    for (int i = 0; i < NUM_BODIES; i++) {
-        sys.radius[i] = min_radius + ((float)rand() / RAND_MAX) * (max_radius - min_radius);
-        sys.mass[i] = M_PI * sys.radius[i] * sys.radius[i]; // 2D mass ~ area
-        sys.inv_mass[i] = 1.0f / sys.mass[i];
-        sys.restitution[i] = 0.85f;
+    // 2D simulation in the XY plane: every body shares one z and has vz = 0,
+    // so contact normals have no z component and the bodies stay planar.
+    phys::ModelDesc desc;
+    desc.solver = phys::Solver::Particle;
+    desc.gravity = {0.0f, GRAVITY, 0.0f};
+    desc.bounds_lo = {0.0f, 0.0f, 0.0f};
+    desc.bounds_hi = {domain_x, domain_y, domain_y};
+    desc.wall_restitution = 0.9f;
 
-        sys.px[i] = sys.radius[i] + ((float)rand() / RAND_MAX) * (domain_x - 2 * sys.radius[i]);
-        sys.py[i] = sys.radius[i] + ((float)rand() / RAND_MAX) * (domain_y - 2 * sys.radius[i]);
-        sys.pz[i] = domain_y * 0.5f;  // all in same Z plane
+    phys::HostState sys(NUM_BODIES);
+    for (int i = 0; i < NUM_BODIES; i++) {
+        float r = min_radius + ((float)rand() / RAND_MAX) * (max_radius - min_radius);
+        phys::BodyDesc body = phys::BodyDesc::sphere(r, M_PI * r * r);  // 2D mass ~ area
+        body.restitution = 0.85f;
+        desc.bodies.push_back(body);
+
+        sys.px[i] = r + ((float)rand() / RAND_MAX) * (domain_x - 2 * r);
+        sys.py[i] = r + ((float)rand() / RAND_MAX) * (domain_y - 2 * r);
+        sys.pz[i] = domain_y * 0.5f;
 
         float speed = 6.0f;
         sys.vx[i] = (((float)rand() / RAND_MAX) - 0.5f) * speed;
         sys.vy[i] = (((float)rand() / RAND_MAX) - 0.5f) * speed + 2.0f;
-        sys.vz[i] = 0.0f;
     }
 
-    // Use domain_y as the cube domain size (we handle X boundary separately)
-    float domain_size = std::max(domain_x, domain_y);
+    phys::World world(desc, 1, phys::Device::CUDA);
+    world.set_state(sys);
 
     std::vector<uint8_t> fb(W * H * 3);
 
@@ -140,24 +142,8 @@ int main() {
     std::cout << "Rendering " << TOTAL_FRAMES << " frames with " << NUM_BODIES << " bodies..." << std::endl;
 
     for (int frame = 0; frame < TOTAL_FRAMES; frame++) {
-        // Run substeps on GPU
-        cuda_rigid_body_simulate(
-            sys.px, sys.py, sys.pz,
-            sys.vx, sys.vy, sys.vz,
-            sys.radius, sys.mass, sys.inv_mass, sys.restitution,
-            NUM_BODIES, SIM_SUBSTEPS, DT, GRAVITY, domain_size,
-            cell_size, grid_dim);
-
-        // Manually enforce X boundary (domain is rectangular, not cubic)
-        for (int i = 0; i < NUM_BODIES; i++) {
-            float r = sys.radius[i];
-            if (sys.px[i] < r) { sys.px[i] = r; sys.vx[i] = fabsf(sys.vx[i]) * 0.9f; }
-            if (sys.px[i] > domain_x - r) { sys.px[i] = domain_x - r; sys.vx[i] = -fabsf(sys.vx[i]) * 0.9f; }
-            if (sys.py[i] < r) { sys.py[i] = r; sys.vy[i] = fabsf(sys.vy[i]) * 0.9f; }
-            if (sys.py[i] > domain_y - r) { sys.py[i] = domain_y - r; sys.vy[i] = -fabsf(sys.vy[i]) * 0.9f; }
-            sys.vz[i] = 0.0f;
-            sys.pz[i] = domain_y * 0.5f;
-        }
+        world.step(DT, SIM_SUBSTEPS);
+        world.get_state(sys);
 
         // Clear framebuffer (dark background)
         memset(fb.data(), 0x0E, W * H * 3);
@@ -177,7 +163,7 @@ int main() {
         for (int i = 0; i < NUM_BODIES; i++) {
             int cx = 3 + (int)(sys.px[i] * scale_x);
             int cy = H - 3 - (int)(sys.py[i] * scale_y);  // flip Y
-            int r = std::max(2, (int)(sys.radius[i] * scale_x));
+            int r = std::max(2, (int)(desc.bodies[i].size.x * scale_x));
 
             float speed = sqrtf(sys.vx[i]*sys.vx[i] + sys.vy[i]*sys.vy[i]);
             Color col = velocity_color(speed, max_speed);
@@ -193,7 +179,5 @@ int main() {
 
     pclose(pipe);
     std::cout << "Done! GIF saved to /tmp/rigid_body_sim.gif" << std::endl;
-
-    sys.free();
     return 0;
 }

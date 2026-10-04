@@ -41,6 +41,7 @@ WORKDIR /app
 COPY CMakeLists.txt /app/
 COPY SConstruct /app/
 COPY source/ /app/source/
+COPY tests/ /app/tests/
 
 # Build rigid body benchmark (CUDA)
 RUN mkdir -p build && cd build && \
