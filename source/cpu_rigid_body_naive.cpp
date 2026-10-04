@@ -48,24 +48,24 @@ void cpu_rigid_body_simulate_naive(
                     float ny = dy / dist;
                     float nz = dz / dist;
 
-                    float rel_vx = vx[i] - vx[j];
-                    float rel_vy = vy[i] - vy[j];
-                    float rel_vz = vz[i] - vz[j];
+                    float rel_vx = vx[j] - vx[i];
+                    float rel_vy = vy[j] - vy[i];
+                    float rel_vz = vz[j] - vz[i];
                     float rel_vn = rel_vx * nx + rel_vy * ny + rel_vz * nz;
 
-                    if (rel_vn > 0.0f) continue;
+                    if (rel_vn >= 0.0f) continue;  // separating
 
                     float e = 0.5f * (restitution[i] + restitution[j]);
                     float inv_mi = inv_mass[i];
                     float inv_mj = inv_mass[j];
                     float j_imp = -(1.0f + e) * rel_vn / (inv_mi + inv_mj);
 
-                    vx[i] += j_imp * inv_mi * nx;
-                    vy[i] += j_imp * inv_mi * ny;
-                    vz[i] += j_imp * inv_mi * nz;
-                    vx[j] -= j_imp * inv_mj * nx;
-                    vy[j] -= j_imp * inv_mj * ny;
-                    vz[j] -= j_imp * inv_mj * nz;
+                    vx[i] -= j_imp * inv_mi * nx;
+                    vy[i] -= j_imp * inv_mi * ny;
+                    vz[i] -= j_imp * inv_mi * nz;
+                    vx[j] += j_imp * inv_mj * nx;
+                    vy[j] += j_imp * inv_mj * ny;
+                    vz[j] += j_imp * inv_mj * nz;
 
                     float overlap = min_dist - dist;
                     float corr_i = overlap * 0.5f * inv_mi / (inv_mi + inv_mj);

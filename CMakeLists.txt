@@ -4,7 +4,7 @@ project(PhysicsEngine LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CUDA_STANDARD 14)
 
-# Detect GPU architecture automatically, fall back to common ones
+# Fall back to common Jetson architectures (Xavier, Orin) when not specified
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "72;87")
 endif()
@@ -18,56 +18,57 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Benchmark executable (rigid body engine + benchmark harness)
+find_package(CUDAToolkit REQUIRED)
+
+option(PHYS_STRICT_FP
+       "Disable FMA contraction so the CPU and CUDA backends match bit for bit" ON)
+
+# libphys: batched rigid body simulation with CPU and CUDA backends
+add_library(phys STATIC
+    source/phys/world.cpp
+    source/phys/backend_cpu.cpp
+    source/phys/backend_cuda.cu
+)
+target_include_directories(phys PUBLIC source)
+target_link_libraries(phys PUBLIC CUDA::cudart)
+if(PHYS_STRICT_FP)
+    target_compile_options(phys PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>
+        $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
+    target_compile_definitions(phys PUBLIC PHYS_STRICT_FP)
+endif()
+
+# Benchmark: libphys (CPU + CUDA) against hand-written CPU baselines
 add_executable(benchmark
     source/benchmark.cpp
     source/cpu_rigid_body.cpp
     source/cpu_rigid_body_naive.cpp
-    source/cuda_rigid_body.cu
 )
+target_link_libraries(benchmark PRIVATE phys)
 
-target_include_directories(benchmark PRIVATE source)
+# Rigid solver throughput on batched environments (env-steps per second)
+add_executable(bench_envs source/bench_envs.cpp)
+target_link_libraries(bench_envs PRIVATE phys)
 
-# Link CUDA runtime
-target_link_libraries(benchmark PRIVATE cudart)
+# Visualizations (render GIFs via an ffmpeg pipe)
+add_executable(visualize source/visualize.cpp)
+target_link_libraries(visualize PRIVATE phys)
 
-# Enable separable compilation for thrust
-set_target_properties(benchmark PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-)
+add_executable(visualize_pour source/visualize_pendulum.cpp)
+target_link_libraries(visualize_pour PRIVATE phys)
 
-# Visualization executable (renders GIF via ffmpeg pipe)
-add_executable(visualize
-    source/visualize.cpp
-    source/cpu_rigid_body.cpp
-    source/cuda_rigid_body.cu
-)
-
-target_include_directories(visualize PRIVATE source)
-target_link_libraries(visualize PRIVATE cudart)
-set_target_properties(visualize PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-)
-
-# Particle pour visualization (GPU-accelerated)
-add_executable(visualize_pour
-    source/visualize_pendulum.cpp
-    source/cpu_rigid_body.cpp
-    source/cuda_rigid_body.cu
-)
-target_include_directories(visualize_pour PRIVATE source)
-target_link_libraries(visualize_pour PRIVATE cudart)
-set_target_properties(visualize_pour PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-)
+add_executable(visualize_rigid source/visualize_rigid.cpp)
+target_link_libraries(visualize_rigid PRIVATE phys)
 
 # Double pendulum chaos visualization (CUDA-parallel RK4)
 add_executable(visualize_chaos
     source/visualize_chaos.cpp
     source/cuda_pendulum.cu
 )
-target_include_directories(visualize_chaos PRIVATE source)
-target_link_libraries(visualize_chaos PRIVATE cudart)
-set_target_properties(visualize_chaos PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-)
+target_link_libraries(visualize_chaos PRIVATE CUDA::cudart)
+
+# Tests
+enable_testing()
+add_executable(test_phys tests/test_phys.cpp)
+target_link_libraries(test_phys PRIVATE phys)
+add_test(NAME test_phys COMMAND test_phys)

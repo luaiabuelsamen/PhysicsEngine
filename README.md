@@ -1,14 +1,24 @@
 # GPU-Accelerated Physics Engine
 
-A massively parallel rigid body dynamics simulator built with C++ and CUDA. Supports 100,000+ simultaneous objects. At 100,000 bodies it runs **12x faster than an optimized, algorithmically-matched single-threaded CPU implementation** (350 ms vs 4,222 ms), and ~1,570x faster than a naive O(n^2) baseline at 50,000 bodies. Both baselines are in the benchmark table below.
+A rigid body physics engine in C++ and CUDA, built as a batched library (`libphys`) that steps thousands of independent environments at once — the foundation for a GPU reinforcement-learning physics engine.
+
+- **Rigid solver** (XPBD with substeps): rotating spheres, capsules, boxes and planes with friction and restitution. On the GPU it runs **~470,000 env-steps/s** (4,096 envs of 10 falling shapes each), 22x a single CPU core.
+- **Particle solver**: 100,000+ frictionless spheres in one scene; at 100,000 bodies the GPU runs **9x faster than a hand-optimized single-threaded CPU implementation** (373 ms vs 3,393 ms).
+- The CPU and GPU backends are deterministic and produce **bit-identical** trajectories.
+
+All numbers are in the benchmark tables below.
+
+![Rigid Pile](static/rigid_pile.gif)
+
+*Rigid solver: spheres, capsules and boxes rain onto a pyramid of boxes (46 bodies, friction, restitution).*
 
 ![Rigid Body Simulation](static/rigid_body_sim.gif)
 
-*200 rigid bodies with gravity, sphere-sphere collisions, and impulse-based resolution. Color indicates velocity: teal (slow) to red (fast).*
+*Particle solver: 200 spheres with gravity and collisions. Color indicates velocity: teal (slow) to red (fast).*
 
 ![Particle Pour](static/particle_pour.gif)
 
-*2,000 rigid bodies pouring from two streams with gravity and collisions, simulated on GPU.*
+*Particle solver: 2,000 spheres pouring from two streams, simulated on GPU.*
 
 ![Pendulum Chaos](static/pendulum_chaos.gif)
 
@@ -16,42 +26,111 @@ A massively parallel rigid body dynamics simulator built with C++ and CUDA. Supp
 
 ## Architecture
 
-### GPU Pipeline (per simulation step)
+### Library layout
 
-1. **Semi-implicit Euler Integration** - Each CUDA thread updates one body's velocity and position
-2. **Spatial Hash Computation** - Maps each body to a 3D grid cell, computed in parallel
-3. **Radix Sort** - Bodies sorted by grid cell hash using Thrust (O(n) on GPU)
-4. **Cell Boundary Detection** - Identifies start/end of each cell in sorted array using shared memory
-5. **Collision Detection & Resolution** - Each thread checks 27 neighboring cells for sphere-sphere collisions, applies impulse-based response with positional correction
+`libphys` separates a shared, read-only **model** (the bodies: shape, size, mass, friction, restitution; gravity; solver settings) from the batched **state** of `nenv` independent environments, stored as flat structure-of-arrays indexed by `env * nbody + body`. Bodies in different environments never interact. The same `World` API runs on either backend:
 
-### Key Optimizations
+```cpp
+phys::ModelDesc desc;
+desc.bodies = {phys::BodyDesc::plane(),
+               phys::BodyDesc::box({0.5f, 0.25f, 0.5f}, /*mass=*/1.0f),
+               phys::BodyDesc::capsule(/*radius=*/0.1f, /*half_length=*/0.3f, 1.0f)};
 
-- **Structure-of-Arrays (SoA) layout**: Positions, velocities, and properties stored as separate contiguous arrays for coalesced GPU memory access. Threads in a warp access adjacent memory locations, maximizing bandwidth.
-- **Spatial hash broadphase**: O(n) collision detection using uniform grid. Each body only checks neighboring cells instead of all-pairs O(n²).
-- **Persistent GPU buffers**: Data stays on GPU across simulation steps - host-device transfers only at start and end.
-- **Fast math intrinsics**: `rsqrtf()` for reciprocal square root, `__float2int_rd()` for float-to-int conversion.
-- **Shared memory**: Cell boundary kernel uses shared memory to reduce global memory reads.
-- **`__launch_bounds__`**: Collision kernel uses launch bounds for optimal register allocation.
+phys::World world(desc, /*nenv=*/4096, phys::Device::CUDA);
+world.set_state(initial);        // positions, orientations, velocities of every env
+world.step(1.0f / 60, /*nsteps=*/10);  // asynchronous, no host round-trips
+world.get_state(out);            // or world.state() for raw device pointers
+```
+
+Both backends execute the same `__host__ __device__` routines (`source/phys/rigid.h`, `source/phys/particle.h`), so the CPU backend is a bit-exact reference for the GPU.
+
+### Rigid solver (`Solver::Rigid`, the default)
+
+Extended Position Based Dynamics with substeps, after Macklin et al. 2020, *Detailed Rigid Body Simulation with Extended Position Based Dynamics*. Each step is split into substeps (10 by default); each substep runs:
+
+1. **Integrate** (one thread per body): semi-implicit Euler for position, quaternion integration with the gyroscopic term for orientation
+2. **Detect contacts** (one thread per env): every pair in the env, with bounding-sphere culling. Narrowphase covers sphere/capsule/box/plane; box-box uses a separating-axis test over 15 axes and clips the incident face against the reference face (Sutherland-Hodgman) to build a contact manifold
+3. **Position solve** (one thread per env): penetration corrections over symmetric Gauss-Seidel sweeps, then static friction against the friction cone, then a final penetration sweep
+4. **Update velocities** (one thread per body) from the change in pose
+5. **Velocity solve** (one thread per env): restitution sweeps, then alternating dynamic-friction and restitution sweeps, with friction impulses accumulated and clamped to the cone
+
+RL environments hold few bodies, so the parallelism comes from running many envs at once; each env's contacts are solved in sequence, which keeps the result stable, deterministic and identical on CPU and GPU.
+
+Shapes are centred on their body. Capsules run along the local y axis; planes face along local +y and must be static. A body with mass <= 0 is static.
+
+### Particle solver (`Solver::Particle`)
+
+Non-rotating, frictionless spheres bouncing off axis-aligned walls — for very large single scenes.
+
+1. **Semi-implicit Euler integration** with wall reflection — one thread per body
+2. **Broadphase**, chosen per model:
+   - **All-pairs within each env** for small scenes (≤32 bodies by default)
+   - **Uniform spatial hash** for large scenes: each body gets a key `env * cells + cell`, keys are radix-sorted with CUB (stable, preallocated scratch), and cell start/end offsets are recorded
+3. **Contact response** — each body sums the impulses and positional corrections from all its contacts into a separate delta buffer. Each pair is evaluated in canonical (lower-index-first) order, so both bodies see exactly opposite impulses and momentum is conserved
+4. **Apply** the deltas
+
+### Determinism
+
+There are no atomics: every phase either writes only its own body (per-body phases) or processes one env sequentially in a fixed order (per-env phases). Runs are bit-for-bit repeatable. With `PHYS_STRICT_FP` (on by default; disables FMA contraction, measured at no cost) the CPU and CUDA backends agree bit for bit — the tests and the particle benchmark check this.
+
+### Key optimizations
+
+- **Structure-of-Arrays (SoA) layout** for coalesced GPU memory access
+- **Spatial hash broadphase** (particle solver): O(n) collision detection; each body only checks the 27 surrounding cells
+- **Resident state**: all buffers, including contact buffers and sort scratch space, are allocated once; stepping launches a fixed sequence of kernels with no host transfers or allocations
+- **Narrow radix sort**: only the key bits that can be used are sorted
+
+### Current limitations
+
+- One GPU thread solves each env's contacts, so a single large scene (dozens of bodies) runs faster on the CPU backend; the GPU pays off with many envs.
+- Kernel launch overhead dominates small batches (40 launches per step at 10 substeps); CUDA graphs are planned.
+- Box-box manifolds are built per substep from scratch (no persistent contacts or warm starting). An elastic box bouncing exactly flat can twist slightly on its second landing.
+- No joints yet, no rolling resistance, no convex meshes.
 
 ## Benchmark Results
 
-Tested on NVIDIA Jetson Orin NX (1024 CUDA cores, Ampere architecture):
+Tested on NVIDIA Jetson Orin NX (1024 CUDA cores, Ampere architecture).
+
+### Rigid solver: batched environments (`./bench_envs`)
+
+Each env: a ground plane and 10 mixed shapes (spheres, capsules, boxes) falling and settling. 10 substeps, 1/60 s steps; one env-step advances one env by one step.
 
 ```
-Bodies    Steps   CPU Naive     CPU Opt       GPU (ms)      vs Naive      vs Opt
-----------------------------------------------------------------------------------------
-1,000     50      95 ms         29 ms         23 ms         4x            1x
-5,000     50      2,349 ms      160 ms        35 ms         66x           4x
-10,000    50      9,377 ms      335 ms        77 ms         121x          4x
-25,000    50      58,640 ms     897 ms        82 ms         714x          10x
-50,000    50      234,426 ms    1,871 ms      149 ms        1,573x        12x
-100,000   50      ---           4,222 ms      350 ms        ---           12x
-500,000   10      ---           ---           463 ms        ---           ---
+Envs      CPU env-steps/s  GPU env-steps/s    GPU/CPU
+----------------------------------------------------------
+1                   15448              617       0.0x
+16                  19948             5721       0.3x
+64                  21239            22056       1.0x
+256                 21272            70894       3.3x
+1024                  ---           288963        ---
+4096                  ---           469910        ---
+16384                 ---           464024        ---
 ```
 
-- **CPU Naive**: Single-threaded O(n²) brute-force collision detection
-- **CPU Opt**: Single-threaded with spatial hash broadphase
-- **GPU**: CUDA with spatial hash + parallel narrowphase
+CPU is a single core. The GPU overtakes it at ~64 envs and saturates around 4,096.
+
+### Particle solver: one large scene (`./benchmark`)
+
+Dense random scene at ~20% packing, times in ms:
+
+```
+Bodies    Steps  CPU Naive    CPU Opt     CPU Ref     GPU       vs Naive  vs Opt   vs Ref   GPU==Ref
+----------------------------------------------------------------------------------------------------
+1000      50     77.5         20.9        22.7        11.3      6.8x      1.8x     2.0x     yes
+5000      50     1771.3       119.5       137.0       27.6      64.3x     4.3x     5.0x     yes
+10000     50     7088.9       251.0       305.7       37.4      189.7x    6.7x     8.2x     yes
+25000     50     44283.3      673.6       938.6       84.7      522.7x    8.0x     11.1x    yes
+50000     50     177501.0     1478.2      2164.4      150.5     1179.6x   9.8x     14.4x    yes
+100000    50     ---          3392.5      6707.5      372.5     ---       9.1x     18.0x    yes
+200000    20     ---          ---         ---         433.2     ---       ---      ---      ---
+500000    10     ---          ---         ---         696.6     ---       ---      ---      ---
+```
+
+- **CPU Naive**: hand-written single-threaded O(n²) brute force
+- **CPU Opt**: hand-written single-threaded spatial hash that visits each pair once and updates both bodies in place — the fastest single-core approach, but not numerically identical to the GPU
+- **CPU Ref**: `libphys` CPU backend — exactly the GPU algorithm, single-threaded
+- **GPU**: `libphys` CUDA backend
+- GPU and CPU Ref time the steps only, with state already resident (the long-simulation / RL use case). **GPU==Ref** reports whether the two final states are bit-identical.
 
 ## Building
 
@@ -69,14 +148,29 @@ cmake .. -DCMAKE_CUDA_ARCHITECTURES=87  # adjust for your GPU
 make -j$(nproc)
 ```
 
+### Run Tests
+
+```bash
+ctest --output-on-failure     # or ./test_phys
+```
+
+Each test runs on both backends. They cover:
+
+- **Rigid solver** — resting and dropped spheres, boxes and capsules settle at the right height without drifting; an elastic ball bounces back to its drop height; a tilted box tips onto a face; a 5-box stack stays standing; a sliding box stops after v²/2μg (within 0.1%); torque-free tumbling conserves angular momentum; static obstacles; disabled bodies
+- **Particle solver** — elastic collisions against analytic results, momentum conservation, walls, disabled bodies
+- **Both** — GPU run-to-run determinism, bit-exact CPU/GPU parity, independence of batched environments, input validation
+
 ### Run Benchmark
 
 ```bash
 # Full suite
 ./benchmark
 
-# Custom: ./benchmark <num_bodies> [num_steps] [run_naive] [run_optimized_cpu]
+# Custom: ./benchmark <num_bodies> [num_steps] [run_naive] [run_cpu_opt_and_ref]
 ./benchmark 100000 50 0 1
+
+# Rigid solver, batched envs: ./bench_envs [bodies_per_env] [substeps]
+./bench_envs
 ```
 
 ### Docker
@@ -90,12 +184,20 @@ docker run --gpus all physics-engine
 
 ```
 source/
-  RigidBody.h              # SoA data structures for GPU memory coalescing
-  cuda_rigid_body.cu/h      # CUDA kernels: integration, spatial hash, collision
-  cpu_rigid_body.cpp/h      # CPU reference with spatial hash (for comparison)
-  cpu_rigid_body_naive.cpp/h # CPU O(n^2) brute-force baseline
-  benchmark.cpp             # Benchmark harness with CPU vs GPU comparison
-  visualize.cpp             # 2D rigid body renderer - outputs GIF via ffmpeg
+  phys/
+    phys.h                  # Public API: BodyDesc, ModelDesc, HostState, World
+    common.h                # Plain-data types shared by solvers and backends
+    rigid.h                 # Rigid solver: XPBD, narrowphase, friction
+    particle.h              # Particle solver: spheres, walls, spatial hash
+    world.cpp               # Model validation, inertia, grid setup, dispatch
+    backend_cpu.cpp         # CPU backend (bit-exact reference)
+    backend_cuda.cu         # CUDA backend
+  cpu_rigid_body.cpp/h      # Hand-written CPU spatial hash baseline
+  cpu_rigid_body_naive.cpp/h # Hand-written CPU O(n^2) baseline
+  benchmark.cpp             # Particle solver: CPU vs GPU on one large scene
+  bench_envs.cpp            # Rigid solver: env-steps/s on batched envs
+  visualize_rigid.cpp       # Rigid solver demo - software-rendered GIF
+  visualize.cpp             # 2D particle renderer - outputs GIF via ffmpeg
   visualize_pendulum.cpp    # GPU particle pour visualization
   visualize_chaos.cpp       # CUDA-parallel double pendulum chaos
   cuda_pendulum.cu          # CUDA kernel for parallel pendulum RK4 integration
@@ -104,6 +206,8 @@ source/
   MultiMechanicalSystem.cpp/h # Multi-DOF coupled system solver
   cuda_mass_spring.cu/h     # CUDA kernel for mass-spring systems
   ode.h                     # RK4 ODE solver
+tests/
+  test_phys.cpp             # libphys tests (run with ctest)
 CMakeLists.txt              # Build system for rigid body engine
 SConstruct                  # Build system for spring-mass visualization
 Dockerfile                  # CUDA-enabled container

@@ -4,3 +4,4 @@ exe/*
 *.o
 venv/
 __pycache__/
+build/
