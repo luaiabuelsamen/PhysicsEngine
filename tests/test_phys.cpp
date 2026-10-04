@@ -65,10 +65,6 @@ static HostState simulate(const ModelDesc& desc, int nenv, Device device,
     return out;
 }
 
-struct Quat {
-    float w, x, y, z;
-};
-
 static Quat axis_angle(Vec3 axis, float angle) {
     float n = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
     float s = std::sin(angle / 2) / n;
@@ -579,6 +575,509 @@ static void test_rigid_disabled_bodies() {
     }
 }
 
+
+// --- joints ------------------------------------------------------------------
+
+static Quat about_z(float angle) { return axis_angle({0.0f, 0.0f, 1.0f}, angle); }
+
+// Point `local` of body g, in world coordinates.
+static Vec3 body_point(const HostState& s, int g, Vec3 local) {
+    Vec3 ax = body_axis(s, g, 0), ay = body_axis(s, g, 1), az = body_axis(s, g, 2);
+    return {s.px[g] + ax.x * local.x + ay.x * local.y + az.x * local.z,
+            s.py[g] + ax.y * local.x + ay.y * local.y + az.y * local.z,
+            s.pz[g] + ax.z * local.x + ay.z * local.y + az.z * local.z};
+}
+
+static float dist(Vec3 a, Vec3 b) {
+    return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) +
+                     (a.z - b.z) * (a.z - b.z));
+}
+
+// Place body g so that its local point `anchor` sits at world point `pivot`,
+// rotated by `angle` about z.
+static void place(HostState& s, int g, Vec3 pivot, Vec3 anchor, float angle) {
+    float c = std::cos(angle), sn = std::sin(angle);
+    s.px[g] = pivot.x - (c * anchor.x - sn * anchor.y);
+    s.py[g] = pivot.y - (sn * anchor.x + c * anchor.y);
+    s.pz[g] = pivot.z - anchor.z;
+    set_quat(s, g, about_z(angle));
+}
+
+// A rod of length 2 * half hanging from a hinge about z at its top end.
+static BodyDesc rod(float half, float mass) { return BodyDesc::box({0.05f, half, 0.05f}, mass); }
+
+static float rod_inertia_z(float half, float mass) { return mass / 3.0f * (0.0025f + half * half); }
+
+// Classical RK4 for a system x' = f(x).
+template <typename F>
+static void rk4(std::vector<double>& x, double h, F f) {
+    size_t n = x.size();
+    std::vector<double> k1 = f(x), t(n);
+    for (size_t i = 0; i < n; i++) t[i] = x[i] + 0.5 * h * k1[i];
+    std::vector<double> k2 = f(t);
+    for (size_t i = 0; i < n; i++) t[i] = x[i] + 0.5 * h * k2[i];
+    std::vector<double> k3 = f(t);
+    for (size_t i = 0; i < n; i++) t[i] = x[i] + h * k3[i];
+    std::vector<double> k4 = f(t);
+    for (size_t i = 0; i < n; i++) x[i] += h / 6.0 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]);
+}
+
+// Compound pendulum: small-angle period, energy at large amplitude, and how
+// well the hinge holds its anchor.
+static void test_joint_pendulum() {
+    const float half = 0.5f, m = 1.0f, g = 9.81f;
+    const double I_pivot = rod_inertia_z(half, m) + m * half * half;
+    for (Device dev : kDevices) {
+        ModelDesc desc;
+        desc.bodies.push_back(rod(half, m));
+        desc.joints.push_back(JointDesc::hinge(-1, 0, {0, 0, 0}, {0, half, 0}, {0, 0, 1}));
+
+        // Period at 0.1 rad: 2 pi sqrt(I / (m g d)) (1 + theta^2 / 16).
+        {
+            World world(desc, 1, dev);
+            HostState s(1);
+            place(s, 0, {0, 0, 0}, {0, half, 0}, 0.1f);
+            world.set_state(s);
+            std::vector<float> q, qd;
+            float prev = 0.1f, t = 0.0f, first = -1.0f, last = -1.0f;
+            int crossings = 0;
+            for (int i = 0; i < 600; i++) {
+                world.step(kDt);
+                world.get_joint_state(q, qd);
+                t += kDt;
+                if (prev > 0.0f && q[0] <= 0.0f) {  // downward zero crossing
+                    float tc = t - kDt * q[0] / (q[0] - prev);
+                    if (first < 0.0f) first = tc;
+                    last = tc;
+                    crossings++;
+                }
+                prev = q[0];
+            }
+            double expected = 2.0 * M_PI * std::sqrt(I_pivot / (m * g * half)) * (1.0 + 0.01 / 16.0);
+            double period = (last - first) / (crossings - 1);
+            std::printf("  [%s] period %.5f s (expected %.5f)\n", device_name(dev), period, expected);
+            CHECK(crossings >= 5);
+            CHECK(std::fabs(period - expected) < 2e-3 * expected);
+        }
+        // Energy and anchor drift at 1.5 rad over 10 s. Position-based joints
+        // lose energy at first order in the substep length (each substep
+        // moves bodies along a tangent and projects them back), so the loss
+        // must halve as the substeps double.
+        double loss_at[2] = {0.0, 0.0};
+        for (int run = 0; run < 2; run++) {
+            desc.substeps = run == 0 ? 20 : 40;
+            World world(desc, 1, dev);
+            HostState s(1);
+            place(s, 0, {0, 0, 0}, {0, half, 0}, 1.5f);
+            world.set_state(s);
+            auto energy = [&](float q, float qd) {
+                return 0.5 * I_pivot * qd * qd + m * g * half * (1.0 - std::cos(q));
+            };
+            double e0 = energy(1.5f, 0.0f), worst = 0.0;
+            float anchor_err = 0.0f;
+            std::vector<float> q, qd;
+            for (int i = 0; i < 600; i++) {
+                world.step(kDt);
+                world.get_joint_state(q, qd);
+                world.get_state(s);
+                worst = std::fmax(worst, std::fabs(energy(q[0], qd[0]) - e0) / e0);
+                anchor_err = std::fmax(anchor_err, dist(body_point(s, 0, {0, half, 0}), {0, 0, 0}));
+            }
+            loss_at[run] = worst;
+            std::printf("  [%s] %d substeps: energy loss over 10 s %.3f, anchor error %.2g\n",
+                        device_name(dev), desc.substeps, worst, anchor_err);
+            CHECK(anchor_err < 1e-4f);
+        }
+        CHECK(loss_at[1] < 0.6 * loss_at[0]);  // first-order convergence
+        CHECK(loss_at[1] < 0.12);
+    }
+}
+
+// Double pendulum of two rods against its exact equations of motion.
+static void test_joint_double_pendulum() {
+    const float half = 0.5f, m = 1.0f;
+    const double g = 9.81, l1 = 2 * half, lc = half, I = rod_inertia_z(half, m);
+    const float q1_0 = 1.0f, q2_0 = 0.5f;
+
+    // Relative angles from hanging straight down.
+    std::vector<double> x = {q1_0, q2_0, 0.0, 0.0};
+    auto f = [&](const std::vector<double>& s) {
+        double q2 = s[1], w1 = s[2], w2 = s[3];
+        double M11 = 2 * I + m * (lc * lc + l1 * l1 + lc * lc + 2 * l1 * lc * std::cos(q2));
+        double M12 = I + m * (lc * lc + l1 * lc * std::cos(q2));
+        double M22 = I + m * lc * lc;
+        double h = m * l1 * lc * std::sin(q2);
+        double C1 = -h * (2 * w1 * w2 + w2 * w2), C2 = h * w1 * w1;
+        double G1 = (m * lc + m * l1) * g * std::sin(s[0]) + m * g * lc * std::sin(s[0] + q2);
+        double G2 = m * g * lc * std::sin(s[0] + q2);
+        double r1 = -C1 - G1, r2 = -C2 - G2, det = M11 * M22 - M12 * M12;
+        return std::vector<double>{w1, w2, (M22 * r1 - M12 * r2) / det, (M11 * r2 - M12 * r1) / det};
+    };
+
+    for (Device dev : kDevices) {
+      float err_at[2];
+      for (int run = 0; run < 2; run++) {
+        ModelDesc desc;
+        desc.substeps = run == 0 ? 10 : 40;
+        desc.bodies = {rod(half, m), rod(half, m)};
+        desc.joints = {JointDesc::hinge(-1, 0, {0, 0, 0}, {0, half, 0}, {0, 0, 1}),
+                       JointDesc::hinge(0, 1, {0, -half, 0}, {0, half, 0}, {0, 0, 1})};
+        HostState s(2);
+        place(s, 0, {0, 0, 0}, {0, half, 0}, q1_0);
+        Vec3 elbow = body_point(s, 0, {0, -half, 0});
+        place(s, 1, elbow, {0, half, 0}, q1_0 + q2_0);
+
+        World world(desc, 1, dev);
+        world.set_state(s);
+        std::vector<double> ref = x;
+        std::vector<float> q, qd;
+        float worst = 0.0f;
+        for (int i = 1; i <= 90; i++) {  // 1.5 s, before the motion turns chaotic
+            world.step(kDt);
+            for (int k = 0; k < 100; k++) rk4(ref, kDt / 100.0, f);
+            world.get_joint_state(q, qd);
+            worst = std::fmax(worst, std::fmax(std::fabs(q[0] - (float)ref[0]),
+                                               std::fabs(q[1] - (float)ref[1])));
+        }
+        std::printf("  [%s] %d substeps: max angle error vs exact dynamics over 1.5 s: %.4f rad\n",
+                    device_name(dev), desc.substeps, worst);
+        err_at[run] = worst;
+      }
+      CHECK(err_at[1] < 0.5f * err_at[0]);
+      CHECK(err_at[1] < 0.015f);
+    }
+}
+
+// Cart-pole driven by a force on the cart, against its exact equations.
+static void test_joint_cartpole() {
+    const float M = 1.0f, m = 0.1f, half = 0.5f;
+    const double g = 9.81, l = half, I = 0.1 / 3.0 * (0.0004 + half * half);
+    const float theta0 = 0.2f;
+    auto force = [](double t) { return 2.0 * std::sin(3.0 * t); };
+
+    auto wrap = [](double a) { return std::remainder(a, 2.0 * M_PI); };
+    for (Device dev : kDevices) {
+      float err_at[2];
+      for (int run = 0; run < 2; run++) {
+        ModelDesc desc;
+        desc.substeps = run == 0 ? 10 : 40;
+        desc.bodies = {BodyDesc::none(M, {0.1f, 0.1f, 0.1f}),
+                       BodyDesc::box({0.02f, half, 0.02f}, m)};
+        JointDesc rail = JointDesc::slider(-1, 0, {0, 0, 0}, {0, 0, 0}, {1, 0, 0});
+        rail.actuator = Actuator::Torque;
+        desc.joints = {rail, JointDesc::hinge(0, 1, {0, 0, 0}, {0, -half, 0}, {0, 0, 1})};
+        HostState s(2);
+        place(s, 1, {0, 0, 0}, {0, -half, 0}, theta0);
+
+        World world(desc, 1, dev);
+        world.set_state(s);
+        // State: x, theta, x', theta'. theta is the pole's rotation about z
+        // from upright, so its centre is at (x - l sin theta, l cos theta).
+        std::vector<double> ref = {0.0, theta0, 0.0, 0.0};
+        std::vector<float> q, qd;
+        float worst_x = 0.0f, worst_th = 0.0f;
+        double t = 0.0;
+        // 1 s: the pole falls from near upright, an unstable equilibrium that
+        // amplifies any error exponentially, so longer horizons test chaos
+        // rather than the integrator.
+        for (int i = 0; i < 60; i++) {
+            double F = force(t);
+            world.set_controls({(float)F, 0.0f});
+            world.step(kDt);
+            auto f = [&](const std::vector<double>& st) {
+                double th = st[1], w = st[3], c = std::cos(th), sn = std::sin(th);
+                // (M+m) x'' - m l c th'' = F - m l sn w^2
+                // -m l c x'' + (I + m l^2) th'' = m g l sn
+                double a11 = M + m, a12 = -m * l * c, a22 = I + m * l * l;
+                double b1 = F - m * l * sn * w * w, b2 = m * g * l * sn;
+                double det = a11 * a22 - a12 * a12;
+                return std::vector<double>{st[2], w, (a22 * b1 - a12 * b2) / det,
+                                           (a11 * b2 - a12 * b1) / det};
+            };
+            for (int k = 0; k < 100; k++) rk4(ref, kDt / 100.0, f);
+            t += kDt;
+            world.get_joint_state(q, qd);
+            worst_x = std::fmax(worst_x, std::fabs(q[0] - (float)ref[0]));
+            worst_th = std::fmax(worst_th, (float)std::fabs(wrap(q[1] - ref[1])));
+        }
+        std::printf("  [%s] %d substeps, 1 s: x = %.4f (exact %.4f), theta = %.4f (exact %.4f); "
+                    "max errors %.4f m, %.4f rad\n", device_name(dev), desc.substeps, q[0], ref[0],
+                    q[1], wrap(ref[1]), worst_x, worst_th);
+        err_at[run] = worst_th;
+        if (run == 1) {
+            CHECK(worst_x < 0.005f);
+            CHECK(worst_th < 0.01f);
+        }
+      }
+      CHECK(err_at[1] < 0.5f * err_at[0]);
+    }
+}
+
+// Position drives reach the analytic steady state under gravity, and stay
+// stable with stiff gains on a light, finger-sized link.
+static void test_joint_position_drive() {
+    for (Device dev : kDevices) {
+        {
+            const float half = 0.5f, m = 1.0f, kp = 50.0f, target = 0.8f;
+            ModelDesc desc;
+            desc.bodies.push_back(rod(half, m));
+            JointDesc j = JointDesc::hinge(-1, 0, {0, 0, 0}, {0, half, 0}, {0, 0, 1});
+            j.actuator = Actuator::Position;
+            j.kp = kp;
+            j.kd = 5.0f;
+            desc.joints.push_back(j);
+            HostState s(1);
+            place(s, 0, {0, 0, 0}, {0, half, 0}, 0.0f);
+            World world(desc, 1, dev);
+            world.set_state(s);
+            world.set_controls({target});
+            world.step(kDt, 240);
+            std::vector<float> q, qd;
+            world.get_joint_state(q, qd);
+            // kp (target - q) = m g d sin q, solved by bisection.
+            double lo = 0.0, hi = target;
+            for (int i = 0; i < 60; i++) {
+                double mid = 0.5 * (lo + hi);
+                (kp * (target - mid) > m * 9.81 * half * std::sin(mid) ? lo : hi) = mid;
+            }
+            std::printf("  [%s] q = %.5f (steady state %.5f), qd = %.2g\n", device_name(dev), q[0],
+                        lo, qd[0]);
+            CHECK(std::fabs(q[0] - lo) < 2e-3);
+            CHECK(std::fabs(qd[0]) < 1e-3f);
+        }
+        {
+            // 10 g, 4 cm link with kp = 50 N m / rad: natural period ~0.2 ms,
+            // far below the 1.7 ms substep. Explicit PD would explode.
+            ModelDesc desc;
+            desc.bodies.push_back(BodyDesc::capsule(0.008f, 0.012f, 0.01f));
+            JointDesc j = JointDesc::hinge(-1, 0, {0, 0, 0}, {0, 0.02f, 0}, {0, 0, 1});
+            j.actuator = Actuator::Position;
+            j.kp = 50.0f;
+            j.kd = 0.05f;
+            desc.joints.push_back(j);
+            HostState s(1);
+            place(s, 0, {0, 0, 0}, {0, 0.02f, 0}, 0.0f);
+            World world(desc, 1, dev);
+            world.set_state(s);
+            world.set_controls({1.2f});
+            world.step(kDt, 60);
+            std::vector<float> q, qd;
+            world.get_joint_state(q, qd);
+            world.get_state(s);
+            std::printf("  [%s] stiff light finger: q = %.5f (target 1.2), qd = %.2g\n",
+                        device_name(dev), q[0], qd[0]);
+            CHECK(std::isfinite(q[0]) && std::fabs(q[0] - 1.2f) < 1e-3f);
+            CHECK(std::fabs(qd[0]) < 1e-2f);
+            CHECK(dist(body_point(s, 0, {0, 0.02f, 0}), {0, 0, 0}) < 1e-5f);
+        }
+    }
+}
+
+// Velocity drives reach their target speed, and a force limit caps the
+// acceleration at max_force / I.
+static void test_joint_velocity_drive() {
+    for (Device dev : kDevices) {
+        for (float max_force : {0.0f, 0.2f}) {
+            ModelDesc desc;
+            desc.gravity = {0, 0, 0};
+            desc.bodies.push_back(BodyDesc::box({0.5f, 0.1f, 0.1f}, 1.0f));  // spins about its centre
+            JointDesc j = JointDesc::hinge(-1, 0, {0, 0, 0}, {0, 0, 0}, {0, 0, 1});
+            j.actuator = Actuator::Velocity;
+            j.max_force = max_force;
+            desc.joints.push_back(j);
+            World world(desc, 1, dev);
+            world.set_state(HostState(1));
+            world.set_controls({2.0f});
+            world.step(kDt, 30);
+            std::vector<float> q, qd;
+            world.get_joint_state(q, qd);
+            if (max_force == 0.0f) {
+                CHECK(std::fabs(qd[0] - 2.0f) < 1e-4f);
+            } else {
+                float expected = max_force / (1.0f / 3.0f * (0.25f + 0.01f)) * 0.5f;  // tau t / I
+                std::printf("  [%s] force-limited: qd = %.4f after 0.5 s (expected %.4f)\n",
+                            device_name(dev), qd[0], expected);
+                CHECK(std::fabs(qd[0] - expected) < 0.01f * expected);
+            }
+        }
+    }
+}
+
+// Hinge and slider limits hold against gravity.
+static void test_joint_limits() {
+    for (Device dev : kDevices) {
+        ModelDesc desc;
+        desc.gravity = {9.81f, -9.81f, 0.0f};  // pushes the pendulum towards +q, the cart to +x
+        desc.bodies = {rod(0.5f, 1.0f), BodyDesc::none(1.0f, {0.1f, 0.1f, 0.1f})};
+        JointDesc hinge = JointDesc::hinge(-1, 0, {0, 0, 0}, {0, 0.5f, 0}, {0, 0, 1});
+        hinge.limited = true;
+        hinge.lower = -0.3f;
+        hinge.upper = 0.4f;
+        hinge.damping = 0.5f;
+        JointDesc rail = JointDesc::slider(-1, 1, {0, 2, 0}, {0, 0, 0}, {1, 0, 0});
+        rail.limited = true;
+        rail.lower = -1.0f;
+        rail.upper = 0.25f;
+        desc.joints = {hinge, rail};
+        HostState s(2);
+        place(s, 0, {0, 0, 0}, {0, 0.5f, 0}, 0.0f);
+        s.py[1] = 2.0f;
+        World world(desc, 1, dev);
+        world.set_state(s);
+        std::vector<float> q, qd;
+        float max_q = -1e9f, max_x = -1e9f;
+        for (int i = 0; i < 180; i++) {
+            world.step(kDt);
+            world.get_joint_state(q, qd);
+            max_q = std::fmax(max_q, q[0]);
+            max_x = std::fmax(max_x, q[1]);
+        }
+        std::printf("  [%s] hinge: max %.4f final %.4f (limit 0.4); slider: max %.4f final %.4f (limit 0.25)\n",
+                    device_name(dev), max_q, q[0], max_x, q[1]);
+        CHECK(max_q < 0.4f + 2e-3f && std::fabs(q[0] - 0.4f) < 1e-3f);
+        CHECK(max_x < 0.25f + 1e-3f && std::fabs(q[1] - 0.25f) < 1e-3f);
+    }
+}
+
+// A ball-joint pendulum swings conically with its anchor held; two bodies
+// welded by a fixed joint tumble as one.
+static void test_joint_ball_and_fixed() {
+    for (Device dev : kDevices) {
+        {
+            ModelDesc desc;
+            desc.bodies.push_back(rod(0.5f, 1.0f));
+            desc.joints.push_back(JointDesc::ball(-1, 0, {0, 0, 0}, {0, 0.5f, 0}));
+            HostState s(1);
+            place(s, 0, {0, 0, 0}, {0, 0.5f, 0}, 0.6f);
+            s.vz[0] = 1.5f;  // sideways push: conical swing
+            World world(desc, 1, dev);
+            world.set_state(s);
+            float err = 0.0f, max_z = 0.0f;
+            for (int i = 0; i < 180; i++) {
+                world.step(kDt);
+                world.get_state(s);
+                err = std::fmax(err, dist(body_point(s, 0, {0, 0.5f, 0}), {0, 0, 0}));
+                max_z = std::fmax(max_z, std::fabs(s.pz[0]));
+            }
+            std::printf("  [%s] ball anchor error %.2g, max |z| = %.3f\n", device_name(dev), err, max_z);
+            CHECK(err < 1e-4f);
+            CHECK(max_z > 0.1f);  // it really swung out of the plane
+        }
+        {
+            ModelDesc desc;
+            desc.gravity = {0, 0, 0};
+            desc.bodies = {BodyDesc::box({0.3f, 0.2f, 0.1f}, 1.0f), BodyDesc::sphere(0.2f, 0.5f)};
+            desc.joints.push_back(JointDesc::fixed(0, 1, {0.6f, 0, 0}, {0, 0, 0}));
+            HostState s(2);
+            s.px[1] = 0.6f;
+            s.wx[0] = 1.0f; s.wy[0] = 2.0f; s.wz[0] = 0.5f;  // tumbles; the sphere must follow
+            s.vy[1] = 0.3f;
+            World world(desc, 1, dev);
+            world.set_state(s);
+            world.step(kDt, 120);
+            world.get_state(s);
+            float err = dist(body_point(s, 0, {0.6f, 0, 0}), {s.px[1], s.py[1], s.pz[1]});
+            float rot = 0.0f;  // relative rotation: the two frames stay equal
+            for (int k = 0; k < 3; k++) {
+                Vec3 a = body_axis(s, 0, k), b = body_axis(s, 1, k);
+                rot = std::fmax(rot, dist(a, b));
+            }
+            std::printf("  [%s] fixed: anchor error %.2g, frame error %.2g\n", device_name(dev), err, rot);
+            CHECK(err < 1e-4f && rot < 1e-4f);
+            CHECK(spin(s, 0) > 0.5f);
+        }
+    }
+}
+
+// Jointed bodies don't collide with each other by default; group / mask
+// bits switch other pairs off.
+static void test_joint_collision_filter() {
+    for (Device dev : kDevices) {
+        ModelDesc desc = ground_scene({BodyDesc::box({0.3f, 0.3f, 0.3f}, 1.0f),
+                                       BodyDesc::box({0.3f, 0.3f, 0.3f}, 1.0f),
+                                       BodyDesc::sphere(0.2f, 1.0f)});
+        // Two overlapping boxes hinged together, hanging in the air.
+        JointDesc top = JointDesc::fixed(-1, 1, {0, 2, 0}, {0, 0, 0});
+        desc.joints = {top, JointDesc::hinge(1, 2, {0.2f, 0, 0}, {-0.2f, 0, 0}, {0, 0, 1})};
+        desc.bodies[3].collision_mask = 0;  // the sphere ignores everything
+        HostState s(4);
+        s.py[1] = 2.0f;
+        s.px[2] = 0.4f; s.py[2] = 2.0f;
+        s.py[3] = 1.0f;
+        World world(desc, 1, dev);
+        world.set_state(s);
+        world.step(kDt, 60);
+        world.get_state(s);
+        std::vector<float> q, qd;
+        world.get_joint_state(q, qd);
+        std::printf("  [%s] hinged overlap: |v| = %.2g; sphere y = %.2f\n", device_name(dev),
+                    speed(s, 2), s.py[3]);
+        CHECK(speed(s, 1) < 1e-3f);      // nothing pushed the boxes apart
+        CHECK(s.py[3] < -1.0f);          // fell through the floor
+    }
+}
+
+// An actuated chain lying on the ground: deterministic, CPU == GPU, and each
+// env independent.
+static void test_joint_determinism_and_parity() {
+    const int nlink = 5, nenv = 48;
+    ModelDesc desc;
+    desc.bodies.push_back(BodyDesc::plane());
+    for (int i = 0; i < nlink; i++) desc.bodies.push_back(BodyDesc::capsule(0.08f, 0.15f, 0.5f));
+    for (int i = 1; i < nlink; i++) {
+        JointDesc j = JointDesc::hinge(i, i + 1, {0, 0.23f, 0}, {0, -0.23f, 0}, {0, 0, 1});
+        j.limited = true;
+        j.lower = -1.2f;
+        j.upper = 1.2f;
+        j.actuator = i % 2 ? Actuator::Position : Actuator::Torque;
+        j.kp = 20.0f;
+        j.kd = 0.5f;
+        j.max_force = 3.0f;
+        desc.joints.push_back(j);
+    }
+    int nbody = (int)desc.bodies.size(), njoint = (int)desc.joints.size();
+    std::mt19937 rng(2);
+    std::uniform_real_distribution<float> unit(-1.0f, 1.0f);
+    HostState s(nbody * nenv);
+    for (int e = 0; e < nenv; e++) {
+        for (int i = 1; i < nbody; i++) {  // a straight chain along +x, lying down
+            int g = e * nbody + i;
+            s.px[g] = 0.46f * (i - 1);
+            s.py[g] = 0.1f;
+            set_quat(s, g, about_z(-1.5707963f));
+            s.vy[g] = 0.2f * unit(rng);
+        }
+    }
+    auto run = [&](Device dev, int n, const HostState& init) {
+        World world(desc, n, dev);
+        world.set_state(init);
+        std::mt19937 ctrl_rng(7);
+        std::vector<float> ctrl(n * njoint);
+        for (int step = 0; step < 90; step++) {
+            for (float& c : ctrl) c = unit(ctrl_rng);
+            world.set_controls(ctrl);
+            world.step(kDt);
+        }
+        HostState out;
+        world.get_state(out);
+        return out;
+    };
+    HostState cpu = run(Device::CPU, nenv, s), gpu = run(Device::CUDA, nenv, s);
+    CHECK(same_bits(gpu, run(Device::CUDA, nenv, s)));
+#ifdef PHYS_STRICT_FP
+    CHECK(same_bits(cpu, gpu));
+#endif
+    float min_y = 1e9f, spread = 0.0f;
+    for (int g = 0; g < gpu.size(); g++) {
+        if (g % nbody == 0) continue;
+        min_y = std::fmin(min_y, gpu.py[g]);
+        spread = std::fmax(spread, std::fabs(gpu.px[g] - s.px[g]));
+    }
+    std::printf("  lowest link y = %.3f, max x displacement = %.3f\n", min_y, spread);
+    CHECK(min_y > 0.05f);    // links stay on top of the ground
+    CHECK(spread > 0.02f);   // and the actuators actually moved them
+}
+
 static void test_invalid_models_rejected() {
     auto throws = [](const std::function<void()>& f) {
         try { f(); } catch (const std::invalid_argument&) { return true; }
@@ -608,6 +1107,24 @@ static void test_invalid_models_rejected() {
 
     CHECK(throws([&] { World w(ok, 0, Device::CPU); }));
 
+    ModelDesc self_joint = ok;
+    self_joint.joints.push_back(JointDesc::hinge(0, 0, {0, 0, 0}, {0, 0, 0}, {0, 0, 1}));
+    CHECK(throws([&] { World w(self_joint, 1, Device::CPU); }));
+
+    ModelDesc limited_ball = ok;
+    limited_ball.joints.push_back(JointDesc::ball(-1, 0, {0, 0, 0}, {0, 0, 0}));
+    limited_ball.joints[0].limited = true;
+    CHECK(throws([&] { World w(limited_ball, 1, Device::CPU); }));
+
+    ModelDesc particle_joint = ok;
+    particle_joint.solver = Solver::Particle;
+    particle_joint.joints.push_back(JointDesc::hinge(-1, 0, {0, 0, 0}, {0, 0, 0}, {0, 0, 1}));
+    CHECK(throws([&] { World w(particle_joint, 1, Device::CPU); }));
+
+    ModelDesc shapeless = ok;
+    shapeless.bodies[0] = BodyDesc::none(1.0f, {0, 0, 0});
+    CHECK(throws([&] { World w(shapeless, 1, Device::CPU); }));
+
     World world(ok, 2, Device::CPU);
     CHECK(throws([&] { world.set_state(HostState(1)); }));
 }
@@ -633,6 +1150,15 @@ int main(int argc, char** argv) {
         {"rigid_determinism_and_parity", test_rigid_determinism_and_parity},
         {"rigid_env_independence", test_rigid_env_independence},
         {"rigid_disabled_bodies", test_rigid_disabled_bodies},
+        {"joint_pendulum", test_joint_pendulum},
+        {"joint_double_pendulum", test_joint_double_pendulum},
+        {"joint_cartpole", test_joint_cartpole},
+        {"joint_position_drive", test_joint_position_drive},
+        {"joint_velocity_drive", test_joint_velocity_drive},
+        {"joint_limits", test_joint_limits},
+        {"joint_ball_and_fixed", test_joint_ball_and_fixed},
+        {"joint_collision_filter", test_joint_collision_filter},
+        {"joint_determinism_and_parity", test_joint_determinism_and_parity},
         {"invalid_models_rejected", test_invalid_models_rejected},
     };
     const char* only = argc > 1 ? argv[1] : nullptr;

@@ -28,6 +28,10 @@ struct Vec3 {
     float x, y, z;
 };
 
+struct Quat {
+    float w = 1.0f, x = 0.0f, y = 0.0f, z = 0.0f;
+};
+
 enum class Device { CPU, CUDA };
 
 enum class Solver { Rigid, Particle };
@@ -39,8 +43,9 @@ enum class Broadphase {  // Particle solver only
 };
 
 // Shapes are centred on the body origin. Capsules run along the local y axis;
-// planes pass through the body origin and face along local +y.
-enum class Shape { Sphere = 0, Capsule = 1, Box = 2, Plane = 3 };
+// planes pass through the body origin and face along local +y. Bodies with
+// Shape::None have no collision geometry and need an explicit inertia.
+enum class Shape { Sphere = 0, Capsule = 1, Box = 2, Plane = 3, None = 4 };
 
 struct BodyDesc {
     Shape shape = Shape::Sphere;
@@ -49,15 +54,67 @@ struct BodyDesc {
     float mass = 1.0f;  // <= 0 makes the body static; planes must be static
     float restitution = 0.5f;
     float friction = 0.5f;  // Rigid solver only
+    // Principal moments of inertia in the body frame. Zero means "compute
+    // from the shape as a solid of uniform density".
+    Vec3 inertia{0.0f, 0.0f, 0.0f};
+    // Two bodies collide only if each one's group shares a bit with the
+    // other's mask (as MuJoCo's contype / conaffinity).
+    uint32_t collision_group = 1;
+    uint32_t collision_mask = 0xffffffffu;
 
     static BodyDesc sphere(float radius, float mass);
     static BodyDesc capsule(float radius, float half_length, float mass);
     static BodyDesc box(Vec3 half_extents, float mass);
     static BodyDesc plane();
+    static BodyDesc none(float mass, Vec3 inertia);
+};
+
+enum class JointType { Hinge = 0, Slider = 1, Ball = 2, Fixed = 3 };
+
+enum class Actuator {
+    None = 0,
+    Torque = 1,    // control is a torque (hinge) or force (slider)
+    Position = 2,  // control is a target angle / offset; PD with gains kp, kd
+    Velocity = 3,  // control is a target angular / linear velocity
+};
+
+// A joint connects a child body to a parent body (or to the world, parent =
+// -1). It is defined by a frame - an anchor point and an orientation - in
+// each body's local frame (in world coordinates for the world). The frame's
+// x axis is the hinge axis or slider direction. At joint position 0 the two
+// frames coincide. Rigid solver only.
+struct JointDesc {
+    JointType type = JointType::Hinge;
+    int parent = -1;
+    int child = 0;
+    Vec3 parent_anchor{0.0f, 0.0f, 0.0f};
+    Quat parent_frame;
+    Vec3 child_anchor{0.0f, 0.0f, 0.0f};
+    Quat child_frame;
+
+    // Hinge / slider only.
+    bool limited = false;
+    float lower = 0.0f, upper = 0.0f;  // radians or length
+    float damping = 0.0f;              // passive, torque (force) per unit velocity
+    Actuator actuator = Actuator::None;
+    float kp = 0.0f, kd = 0.0f;        // Position actuator gains
+    float max_force = 0.0f;            // actuator force / torque limit; 0: none
+
+    // Joints whose two frames share one orientation, with `axis` (a hinge or
+    // slider direction, ignored for ball / fixed) given in the parent frame.
+    // Use when parent and child have the same orientation at joint position 0.
+    static JointDesc hinge(int parent, int child, Vec3 parent_anchor, Vec3 child_anchor,
+                           Vec3 axis);
+    static JointDesc slider(int parent, int child, Vec3 parent_anchor, Vec3 child_anchor,
+                            Vec3 axis);
+    static JointDesc ball(int parent, int child, Vec3 parent_anchor, Vec3 child_anchor);
+    static JointDesc fixed(int parent, int child, Vec3 parent_anchor, Vec3 child_anchor);
 };
 
 struct ModelDesc {
     std::vector<BodyDesc> bodies;
+    std::vector<JointDesc> joints;  // Rigid solver only
+    bool collide_jointed_bodies = false;  // contacts between a joint's two bodies
     Vec3 gravity{0.0f, -9.81f, 0.0f};
     Solver solver = Solver::Rigid;
 
@@ -101,8 +158,11 @@ struct StateView {
     float *qw, *qx, *qy, *qz;
     float *wx, *wy, *wz;
     uint8_t* enabled;
+    float* ctrl;      // [nenv * njoint] actuator inputs
+    float* joint_q;   // [nenv * njoint] joint positions, after the last step
+    float* joint_qd;  // [nenv * njoint] joint velocities, after the last step
     Device device;
-    int nenv, nbody;
+    int nenv, nbody, njoint;
 };
 
 namespace detail { class Backend; }
@@ -118,6 +178,7 @@ public:
 
     int nenv() const { return nenv_; }
     int nbody() const { return nbody_; }
+    int njoint() const { return njoint_; }
     Device device() const { return device_; }
     Solver solver() const { return solver_; }
     Broadphase broadphase() const { return broadphase_; }  // never Auto
@@ -131,6 +192,13 @@ public:
     void step(float dt, int nsteps = 1);
     void synchronize();
 
+    // Actuator inputs, [nenv * njoint] (entries for joints without an
+    // actuator are ignored). They persist until changed.
+    void set_controls(const std::vector<float>& ctrl);
+    // Joint positions (hinge angle, slider offset) and velocities after the
+    // last step, [nenv * njoint]. Ball and fixed joints report 0.
+    void get_joint_state(std::vector<float>& q, std::vector<float>& qd);
+
     // Rigid solver: contacts found per env in the last substep. A count above
     // max_contacts_per_env() means contacts were dropped.
     void get_contact_counts(std::vector<int>& counts);
@@ -138,7 +206,7 @@ public:
     StateView state();
 
 private:
-    int nenv_, nbody_;
+    int nenv_, nbody_, njoint_;
     Device device_;
     Solver solver_;
     Broadphase broadphase_;

@@ -68,6 +68,16 @@ __global__ void apply_kernel(Buffers b, int n) {
 
 // --- rigid solver ------------------------------------------------------------
 
+__global__ void rigid_actuators_kernel(Params p, Buffers b) {
+    int e = thread_index();
+    if (e < p.nenv) rigid_apply_actuators(p, b, e);
+}
+
+__global__ void rigid_observe_kernel(Params p, Buffers b, int n) {
+    int i = thread_index();
+    if (i < n) rigid_observe_joint(p, b, i);
+}
+
 __global__ void rigid_integrate_kernel(Params p, Buffers b, int n) {
     int g = thread_index();
     if (g < n) rigid_integrate(p, b, g);
@@ -119,11 +129,20 @@ public:
         b_.friction = upload_model(model.friction);
 
         if (p_.rigid) {
-            for (int a = 0; a < 3; a++) alloc(&b_.prev_pos[a], fb);
-            for (int a = 0; a < 4; a++) alloc(&b_.prev_quat[a], fb);
+            for (int a = 0; a < 3; a++) {
+                alloc(&b_.disp[a], fb);
+                alloc(&b_.drot[a], fb);
+            }
             alloc(&b_.contacts, (size_t)p_.nenv * p_.max_contacts * sizeof(Contact));
             alloc(&b_.ncontact, p_.nenv * sizeof(int));
             PHYS_CUDA(cudaMemset(b_.ncontact, 0, p_.nenv * sizeof(int)));
+            b_.joints = upload_model(model.joints);
+            b_.may_collide = upload_model(model.may_collide);
+            size_t jb = (size_t)p_.nenv * p_.njoint * sizeof(float);
+            for (float** buf : {&b_.ctrl, &b_.joint_q, &b_.joint_qd, &b_.joint_lambda}) {
+                alloc(buf, jb);
+                PHYS_CUDA(cudaMemset(*buf, 0, jb));
+            }
         } else {
             for (int a = 0; a < 3; a++) {
                 alloc(&b_.dpos[a], fb);
@@ -159,6 +178,8 @@ public:
             else
                 particle_step();
         }
+        int nj = p_.nenv * p_.njoint;
+        if (p_.rigid && nj > 0) rigid_observe_kernel<<<blocks_for(nj), kThreads>>>(p_, b_, nj);
         PHYS_CUDA(cudaGetLastError());
     }
 
@@ -169,11 +190,19 @@ public:
         copy_out(counts, b_.ncontact);
     }
 
+    void upload_controls(const std::vector<float>& ctrl) override { copy_in(b_.ctrl, ctrl); }
+
+    void download_joint_state(std::vector<float>& q, std::vector<float>& qd) override {
+        copy_out(q, b_.joint_q);
+        copy_out(qd, b_.joint_qd);
+    }
+
     StateView view() override {
-        return {b_.pos[0],    b_.pos[1],    b_.pos[2],    b_.vel[0],  b_.vel[1],
-                b_.vel[2],    b_.quat[0],   b_.quat[1],   b_.quat[2], b_.quat[3],
-                b_.angvel[0], b_.angvel[1], b_.angvel[2], b_.enabled, Device::CUDA,
-                p_.nenv,      p_.nbody};
+        return {b_.pos[0],    b_.pos[1],    b_.pos[2],    b_.vel[0],     b_.vel[1],
+                b_.vel[2],    b_.quat[0],   b_.quat[1],   b_.quat[2],    b_.quat[3],
+                b_.angvel[0], b_.angvel[1], b_.angvel[2], b_.enabled,    b_.ctrl,
+                b_.joint_q,   b_.joint_qd,  Device::CUDA, p_.nenv,       p_.nbody,
+                p_.njoint};
     }
 
 private:
@@ -181,6 +210,8 @@ private:
         int body_blocks = blocks_for(n_);
         int env_blocks = blocks_for(p_.nenv, kEnvThreads);
         for (int sub = 0; sub < p_.substeps; sub++) {
+            if (p_.has_torque_actuators)
+                rigid_actuators_kernel<<<env_blocks, kEnvThreads>>>(p_, b_);
             rigid_integrate_kernel<<<body_blocks, kThreads>>>(p_, b_, n_);
             rigid_positions_kernel<<<env_blocks, kEnvThreads>>>(p_, b_);
             rigid_update_velocities_kernel<<<body_blocks, kThreads>>>(p_, b_, n_);

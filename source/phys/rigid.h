@@ -4,11 +4,17 @@
 // backends. Bodies rotate, have a shape (sphere, capsule, box, plane) and
 // friction. Each step is split into substeps; each substep runs
 //
+//   rigid_apply_actuators    per env   torque / force actuators (if any)
 //   rigid_integrate          per body  predict position and orientation
-//   rigid_solve_positions    per env   detect contacts, then push bodies
-//                                      apart and apply static friction
+//   rigid_solve_positions    per env   detect contacts; enforce joints and
+//                                      position drives, push bodies apart,
+//                                      apply static friction
 //   rigid_update_velocities  per body  velocities from the position change
-//   rigid_solve_velocities   per env   dynamic friction and restitution
+//   rigid_solve_velocities   per env   joint damping and velocity drives,
+//                                      dynamic friction and restitution
+//
+// and after the last substep rigid_observe_joint (per joint instance)
+// records joint positions and velocities.
 //
 // following Macklin et al. 2020, "Detailed Rigid Body Simulation with
 // Extended Position Based Dynamics". Each env's contacts are solved in
@@ -84,8 +90,23 @@ PHYS_HD void store4(float* const a[4], int g, Q4 q) {
 }
 PHYS_HD V3 model3(const float* a, int i) { return {a[3 * i], a[3 * i + 1], a[3 * i + 2]}; }
 
+// Body index g is global (env * nbody + body), or -1 for the world, which
+// is static and sits at the origin with identity orientation.
+
 PHYS_HD bool is_dynamic(const Params& p, const Buffers& b, int g) {
-    return b.inv_mass[g % p.nbody] > 0.0f;
+    return g >= 0 && b.inv_mass[g % p.nbody] > 0.0f;
+}
+
+PHYS_HD Q4 body_quat(const Buffers& b, int g) {
+    return g >= 0 ? load4(b.quat, g) : Q4{1.0f, 0.0f, 0.0f, 0.0f};
+}
+
+PHYS_HD V3 body_vel(const Buffers& b, int g) {
+    return g >= 0 ? load3(b.vel, g) : V3{0.0f, 0.0f, 0.0f};
+}
+
+PHYS_HD V3 body_angvel(const Buffers& b, int g) {
+    return g >= 0 ? load3(b.angvel, g) : V3{0.0f, 0.0f, 0.0f};
 }
 
 // World-frame inverse inertia applied to v.
@@ -98,43 +119,79 @@ PHYS_HD V3 inv_inertia_times(const Params& p, const Buffers& b, int g, Q4 q, V3 
 // offset r from its centre.
 PHYS_HD float generalized_inv_mass(const Params& p, const Buffers& b, int g, Q4 q, V3 r,
                                    V3 dir) {
-    float im = b.inv_mass[g % p.nbody];
-    if (im == 0.0f) return 0.0f;
+    if (!is_dynamic(p, b, g)) return 0.0f;
     V3 rn = cross(r, dir);
-    return im + dot(rn, inv_inertia_times(p, b, g, q, rn));
+    return b.inv_mass[g % p.nbody] + dot(rn, inv_inertia_times(p, b, g, q, rn));
+}
+
+// Inverse moment of inertia of body g about unit axis n.
+PHYS_HD float angular_inv_mass(const Params& p, const Buffers& b, int g, V3 n) {
+    if (!is_dynamic(p, b, g)) return 0.0f;
+    return dot(n, inv_inertia_times(p, b, g, load4(b.quat, g), n));
+}
+
+// Move body g by dx and rotate it by the small rotation vector dtheta,
+// recording both in the substep's motion.
+PHYS_HD void move_body(const Buffers& b, int g, V3 dx, V3 dtheta) {
+    store3(b.pos, g, load3(b.pos, g) + dx);
+    store3(b.disp, g, load3(b.disp, g) + dx);
+    store4(b.quat, g, rotate_by(load4(b.quat, g), dtheta));
+    store3(b.drot, g, load3(b.drot, g) + dtheta);
 }
 
 // Positional impulse P applied at offset r.
 PHYS_HD void apply_position_impulse(const Params& p, const Buffers& b, int g, V3 r, V3 P) {
-    float im = b.inv_mass[g % p.nbody];
-    if (im == 0.0f) return;
-    store3(b.pos, g, load3(b.pos, g) + P * im);
-    Q4 q = load4(b.quat, g);
-    store4(b.quat, g, rotate_by(q, inv_inertia_times(p, b, g, q, cross(r, P))));
+    if (!is_dynamic(p, b, g)) return;
+    move_body(b, g, P * b.inv_mass[g % p.nbody],
+              inv_inertia_times(p, b, g, load4(b.quat, g), cross(r, P)));
+}
+
+// Pure rotational correction: positional "angular impulse" L.
+PHYS_HD void apply_rotation(const Params& p, const Buffers& b, int g, V3 L) {
+    if (!is_dynamic(p, b, g)) return;
+    move_body(b, g, V3{0.0f, 0.0f, 0.0f}, inv_inertia_times(p, b, g, load4(b.quat, g), L));
 }
 
 // Velocity impulse P applied at offset r.
 PHYS_HD void apply_velocity_impulse(const Params& p, const Buffers& b, int g, V3 r, V3 P) {
-    float im = b.inv_mass[g % p.nbody];
-    if (im == 0.0f) return;
-    store3(b.vel, g, load3(b.vel, g) + P * im);
+    if (!is_dynamic(p, b, g)) return;
+    store3(b.vel, g, load3(b.vel, g) + P * b.inv_mass[g % p.nbody]);
     Q4 q = load4(b.quat, g);
     store3(b.angvel, g, load3(b.angvel, g) + inv_inertia_times(p, b, g, q, cross(r, P)));
+}
+
+// Angular impulse L.
+PHYS_HD void apply_angular_impulse(const Params& p, const Buffers& b, int g, V3 L) {
+    if (!is_dynamic(p, b, g)) return;
+    store3(b.angvel, g, load3(b.angvel, g) + inv_inertia_times(p, b, g, load4(b.quat, g), L));
+}
+
+// atan2 from a fixed polynomial (max error ~1e-5 rad), so the CPU and GPU
+// agree bit for bit; the platforms' atan2f implementations differ.
+PHYS_HD float phys_atan2(float y, float x) {
+    float ax = fabsf(x), ay = fabsf(y);
+    float hi = fmaxf(ax, ay), lo = fminf(ax, ay);
+    if (hi == 0.0f) return 0.0f;
+    float z = lo / hi, z2 = z * z;
+    float a = z * (0.99997726f + z2 * (-0.33262347f + z2 * (0.19354346f +
+              z2 * (-0.11643287f + z2 * (0.05265332f + z2 * -0.01172120f)))));
+    if (ay > ax) a = 1.57079633f - a;
+    if (x < 0.0f) a = 3.14159265f - a;
+    return y < 0.0f ? -a : a;
 }
 
 // --- per-body phases ---------------------------------------------------------
 
 PHYS_HD void rigid_integrate(const Params& p, const Buffers& b, int g) {
-    V3 x = load3(b.pos, g);
-    Q4 q = load4(b.quat, g);
-    store3(b.prev_pos, g, x);
-    store4(b.prev_quat, g, q);
+    V3 zero = {0.0f, 0.0f, 0.0f};
+    store3(b.disp, g, zero);
+    store3(b.drot, g, zero);
     if (!b.enabled[g] || !is_dynamic(p, b, g)) return;
 
     V3 grav = {p.gravity[0], p.gravity[1], p.gravity[2]};
     V3 v = load3(b.vel, g) + grav * p.h;
     store3(b.vel, g, v);
-    store3(b.pos, g, x + v * p.h);
+    Q4 q = load4(b.quat, g);
 
     // Torque-free rotation, including the gyroscopic term, in the body frame.
     V3 ii = model3(b.inv_inertia, g % p.nbody);
@@ -143,16 +200,14 @@ PHYS_HD void rigid_integrate(const Params& p, const Buffers& b, int g) {
     wb = wb + mul(ii, cross(Iw, wb)) * p.h;
     V3 w = rotate(q, wb);
     store3(b.angvel, g, w);
-    store4(b.quat, g, rotate_by(q, w * p.h));
+    move_body(b, g, v * p.h, w * p.h);
 }
 
 PHYS_HD void rigid_update_velocities(const Params& p, const Buffers& b, int g) {
     if (!b.enabled[g] || !is_dynamic(p, b, g)) return;
     float inv_h = 1.0f / p.h;
-    store3(b.vel, g, (load3(b.pos, g) - load3(b.prev_pos, g)) * inv_h);
-    Q4 dq = qmul(load4(b.quat, g), conj(load4(b.prev_quat, g)));
-    V3 w = V3{dq.x, dq.y, dq.z} * (2.0f * inv_h);
-    store3(b.angvel, g, dq.w >= 0.0f ? w : -w);
+    store3(b.vel, g, load3(b.disp, g) * inv_h);
+    store3(b.angvel, g, load3(b.drot, g) * inv_h);
 }
 
 // --- contact generation ------------------------------------------------------
@@ -455,7 +510,9 @@ PHYS_HD void collide_pair(ContactSink& s, int i, int j) {
     const Params& p = s.p;
     const Buffers& b = s.b;
     int si = b.shape[i % p.nbody], sj = b.shape[j % p.nbody];
+    if (si == kNoShape || sj == kNoShape) return;
     if (!is_dynamic(p, b, i) && !is_dynamic(p, b, j)) return;
+    if (!b.may_collide[(i % p.nbody) * p.nbody + j % p.nbody]) return;
     if (si != kPlane && sj != kPlane) {
         V3 d = load3(b.pos, i) - load3(b.pos, j);
         float reach = b.radius[i % p.nbody] + b.radius[j % p.nbody];
@@ -509,6 +566,265 @@ PHYS_HD void collide_pair(ContactSink& s, int i, int j) {
     // plane-plane: never in contact
 }
 
+// --- joints ------------------------------------------------------------------
+
+// A joint frame in world coordinates: its origin, orientation, and the
+// origin's offset from the body's centre (unused for the world).
+struct JointFrame {
+    V3 point;
+    Q4 rot;
+    V3 r;
+};
+
+PHYS_HD JointFrame joint_frame(const Buffers& b, int g, const float anchor[3],
+                               const float frame[4]) {
+    V3 a = {anchor[0], anchor[1], anchor[2]};
+    Q4 f = {frame[0], frame[1], frame[2], frame[3]};
+    if (g < 0) return {a, f, V3{0.0f, 0.0f, 0.0f}};
+    Q4 q = load4(b.quat, g);
+    V3 r = rotate(q, a);
+    return {load3(b.pos, g) + r, qmul(q, f), r};
+}
+
+PHYS_HD V3 frame_axis(Q4 rot, int k) {
+    return rotate(rot, V3{k == 0 ? 1.0f : 0.0f, k == 1 ? 1.0f : 0.0f, k == 2 ? 1.0f : 0.0f});
+}
+
+// Signed hinge angle: from the parent frame's y axis to the child's, about
+// the parent frame's x axis.
+PHYS_HD float hinge_angle(Q4 parent_rot, Q4 child_rot) {
+    V3 ex = frame_axis(parent_rot, 0);
+    V3 yp = frame_axis(parent_rot, 1), yc = frame_axis(child_rot, 1);
+    return phys_atan2(dot(cross(yp, yc), ex), dot(yp, yc));
+}
+
+// Move body a's point at offset ra by `corr` relative to body b's point at
+// rb (a rigid, zero-compliance positional constraint).
+PHYS_HD void correct_point(const Params& p, const Buffers& b, int ga, V3 ra, int gb, V3 rb,
+                           V3 corr) {
+    float mag = length(corr);
+    if (mag <= 1e-20f) return;
+    V3 dir = corr * (1.0f / mag);
+    float w = generalized_inv_mass(p, b, ga, body_quat(b, ga), ra, dir) +
+              generalized_inv_mass(p, b, gb, body_quat(b, gb), rb, dir);
+    if (w <= 0.0f) return;
+    V3 P = dir * (mag / w);
+    apply_position_impulse(p, b, ga, ra, P);
+    apply_position_impulse(p, b, gb, rb, -P);
+}
+
+// Rotate body a by the small rotation vector `corr` relative to body b.
+PHYS_HD void correct_rotation(const Params& p, const Buffers& b, int ga, int gb, V3 corr) {
+    float mag = length(corr);
+    if (mag <= 1e-20f) return;
+    V3 n = corr * (1.0f / mag);
+    float w = angular_inv_mass(p, b, ga, n) + angular_inv_mass(p, b, gb, n);
+    if (w <= 0.0f) return;
+    V3 L = n * (mag / w);
+    apply_rotation(p, b, ga, L);
+    apply_rotation(p, b, gb, -L);
+}
+
+// Compliant (XPBD) drive step for constraint value C along unit direction n:
+// rotational when `angular`, else positional at offsets ra / rb. lambda is
+// the correction accumulated this substep; |lambda| is capped at max_lambda
+// (when positive), which bounds the drive's force.
+PHYS_HD void drive_step(const Params& p, const Buffers& b, int ga, V3 ra, int gb, V3 rb, V3 n,
+                        bool angular, float C, float alpha, float max_lambda, float& lambda) {
+    float w = angular ? angular_inv_mass(p, b, ga, n) + angular_inv_mass(p, b, gb, n)
+                      : generalized_inv_mass(p, b, ga, body_quat(b, ga), ra, n) +
+                            generalized_inv_mass(p, b, gb, body_quat(b, gb), rb, n);
+    if (w + alpha <= 0.0f) return;
+    float total = lambda + (-C - alpha * lambda) / (w + alpha);
+    if (max_lambda > 0.0f) total = fminf(fmaxf(total, -max_lambda), max_lambda);
+    float dl = total - lambda;
+    lambda = total;
+    if (angular) {
+        apply_rotation(p, b, ga, n * dl);
+        apply_rotation(p, b, gb, n * -dl);
+    } else {
+        apply_position_impulse(p, b, ga, ra, n * dl);
+        apply_position_impulse(p, b, gb, rb, n * -dl);
+    }
+}
+
+PHYS_HD void joint_bodies(const Params& p, const JointModel& jm, int env, int& gc, int& gp) {
+    gc = env * p.nbody + jm.child;
+    gp = jm.parent < 0 ? -1 : env * p.nbody + jm.parent;
+}
+
+PHYS_HD bool joint_active(const Buffers& b, int gc, int gp) {
+    return b.enabled[gc] && (gp < 0 || b.enabled[gp]);
+}
+
+// One position-level pass over joint j of env: orientation constraint,
+// anchor constraint, limits, then the position drive.
+PHYS_HD void solve_joint_position(const Params& p, const Buffers& b, int env, int j) {
+    const JointModel& jm = b.joints[j];
+    int gc, gp;
+    joint_bodies(p, jm, env, gc, gp);
+    if (!joint_active(b, gc, gp)) return;
+
+    // Orientation: hinges keep their axes aligned; sliders and fixed joints
+    // keep the frames' orientations equal; ball joints leave it free.
+    JointFrame fp = joint_frame(b, gp, jm.parent_anchor, jm.parent_frame);
+    JointFrame fc = joint_frame(b, gc, jm.child_anchor, jm.child_frame);
+    if (jm.type == kHinge) {
+        correct_rotation(p, b, gc, gp, cross(frame_axis(fc.rot, 0), frame_axis(fp.rot, 0)));
+    } else if (jm.type == kSlider || jm.type == kFixed) {
+        Q4 dq = qmul(fp.rot, conj(fc.rot));
+        V3 v = V3{dq.x, dq.y, dq.z} * 2.0f;
+        correct_rotation(p, b, gc, gp, dq.w >= 0.0f ? v : -v);
+    }
+
+    // Anchors coincide, except along a slider's axis (within its limits).
+    fp = joint_frame(b, gp, jm.parent_anchor, jm.parent_frame);
+    fc = joint_frame(b, gc, jm.child_anchor, jm.child_frame);
+    V3 delta = fp.point - fc.point;
+    if (jm.type == kSlider) {
+        V3 ex = frame_axis(fp.rot, 0);
+        float d = -dot(delta, ex);  // child offset along the axis
+        V3 corr = delta + ex * d;
+        if (jm.limited) {
+            if (d < jm.lower) corr = corr + ex * (jm.lower - d);
+            if (d > jm.upper) corr = corr + ex * (jm.upper - d);
+        }
+        correct_point(p, b, gc, fc.r, gp, fp.r, corr);
+    } else {
+        correct_point(p, b, gc, fc.r, gp, fp.r, delta);
+    }
+
+    if (jm.type == kHinge && jm.limited) {
+        fp = joint_frame(b, gp, jm.parent_anchor, jm.parent_frame);
+        fc = joint_frame(b, gc, jm.child_anchor, jm.child_frame);
+        float angle = hinge_angle(fp.rot, fc.rot);
+        V3 ex = frame_axis(fp.rot, 0);
+        if (angle < jm.lower) correct_rotation(p, b, gc, gp, ex * (jm.lower - angle));
+        if (angle > jm.upper) correct_rotation(p, b, gc, gp, ex * (jm.upper - angle));
+    }
+
+    // Position drive: a compliant constraint pulling the joint to its
+    // target, with compliance 1 / kp. Unconditionally stable, unlike an
+    // explicit PD torque, even for light links and stiff gains.
+    if (jm.actuator == kPositionDrive && jm.kp > 0.0f &&
+        (jm.type == kHinge || jm.type == kSlider)) {
+        float target = b.ctrl[env * p.njoint + j];
+        if (jm.limited) target = fminf(fmaxf(target, jm.lower), jm.upper);
+        float alpha = 1.0f / (jm.kp * p.h * p.h);
+        float max_lambda = jm.max_force * p.h * p.h;
+        float& lambda = b.joint_lambda[env * p.njoint + j];
+        fp = joint_frame(b, gp, jm.parent_anchor, jm.parent_frame);
+        fc = joint_frame(b, gc, jm.child_anchor, jm.child_frame);
+        V3 ex = frame_axis(fp.rot, 0);
+        if (jm.type == kHinge) {
+            float C = hinge_angle(fp.rot, fc.rot) - target;
+            drive_step(p, b, gc, fc.r, gp, fp.r, ex, true, C, alpha, max_lambda, lambda);
+        } else {
+            float C = dot(fc.point - fp.point, ex) - target;
+            drive_step(p, b, gc, fc.r, gp, fp.r, ex, false, C, alpha, max_lambda, lambda);
+        }
+    }
+}
+
+// Joint velocity along its free axis: relative angular velocity about a
+// hinge axis, or relative linear velocity of the anchors along a slider.
+PHYS_HD float joint_velocity(const Buffers& b, const JointModel& jm, int gc, int gp,
+                             const JointFrame& fc, const JointFrame& fp) {
+    V3 ex = frame_axis(fp.rot, 0);
+    if (jm.type == kHinge) return dot(body_angvel(b, gc) - body_angvel(b, gp), ex);
+    V3 vc = body_vel(b, gc) + cross(body_angvel(b, gc), fc.r);
+    V3 vp = body_vel(b, gp) + cross(body_angvel(b, gp), fp.r);
+    return dot(vc - vp, ex);
+}
+
+// Velocity-level joint work: passive damping, the position drive's damping
+// (kd) and velocity drives.
+PHYS_HD void solve_joint_velocity(const Params& p, const Buffers& b, int env, int j) {
+    const JointModel& jm = b.joints[j];
+    if (jm.type != kHinge && jm.type != kSlider) return;
+    int gc, gp;
+    joint_bodies(p, jm, env, gc, gp);
+    if (!joint_active(b, gc, gp)) return;
+    float damping = jm.damping + (jm.actuator == kPositionDrive ? jm.kd : 0.0f);
+    bool velocity_drive = jm.actuator == kVelocityDrive;
+    if (damping <= 0.0f && !velocity_drive) return;
+
+    JointFrame fp = joint_frame(b, gp, jm.parent_anchor, jm.parent_frame);
+    JointFrame fc = joint_frame(b, gc, jm.child_anchor, jm.child_frame);
+    V3 ex = frame_axis(fp.rot, 0);
+    bool angular = jm.type == kHinge;
+    float w = angular ? angular_inv_mass(p, b, gc, ex) + angular_inv_mass(p, b, gp, ex)
+                      : generalized_inv_mass(p, b, gc, body_quat(b, gc), fc.r, ex) +
+                            generalized_inv_mass(p, b, gp, body_quat(b, gp), fp.r, ex);
+    if (w <= 0.0f) return;
+
+    float impulse = 0.0f;
+    float v = joint_velocity(b, jm, gc, gp, fc, fp);
+    if (damping > 0.0f) {
+        // Implicit-style damping: never more than what stops the joint.
+        impulse = -damping * v * p.h;
+        float stop = fabsf(v) / w;
+        impulse = fminf(fmaxf(impulse, -stop), stop);
+        v += impulse * w;
+    }
+    if (velocity_drive) {
+        float drive = (b.ctrl[env * p.njoint + j] - v) / w;
+        if (jm.max_force > 0.0f) {
+            float cap = jm.max_force * p.h;
+            drive = fminf(fmaxf(drive, -cap), cap);
+        }
+        impulse += drive;
+    }
+    if (angular) {
+        apply_angular_impulse(p, b, gc, ex * impulse);
+        apply_angular_impulse(p, b, gp, ex * -impulse);
+    } else {
+        apply_velocity_impulse(p, b, gc, fc.r, ex * impulse);
+        apply_velocity_impulse(p, b, gp, fp.r, ex * -impulse);
+    }
+}
+
+// Torque / force actuators, applied as an impulse before integration.
+PHYS_HD void rigid_apply_actuators(const Params& p, const Buffers& b, int env) {
+    for (int j = 0; j < p.njoint; j++) {
+        const JointModel& jm = b.joints[j];
+        if (jm.actuator != kTorque || (jm.type != kHinge && jm.type != kSlider)) continue;
+        int gc, gp;
+        joint_bodies(p, jm, env, gc, gp);
+        if (!joint_active(b, gc, gp)) continue;
+        float u = b.ctrl[env * p.njoint + j];
+        if (jm.max_force > 0.0f) u = fminf(fmaxf(u, -jm.max_force), jm.max_force);
+        JointFrame fp = joint_frame(b, gp, jm.parent_anchor, jm.parent_frame);
+        JointFrame fc = joint_frame(b, gc, jm.child_anchor, jm.child_frame);
+        V3 J = frame_axis(fp.rot, 0) * (u * p.h);
+        if (jm.type == kHinge) {
+            apply_angular_impulse(p, b, gc, J);
+            apply_angular_impulse(p, b, gp, -J);
+        } else {
+            apply_velocity_impulse(p, b, gc, fc.r, J);
+            apply_velocity_impulse(p, b, gp, fp.r, -J);
+        }
+    }
+}
+
+// Joint position and velocity of joint instance idx = env * njoint + j.
+PHYS_HD void rigid_observe_joint(const Params& p, const Buffers& b, int idx) {
+    int env = idx / p.njoint, j = idx % p.njoint;
+    const JointModel& jm = b.joints[j];
+    float q = 0.0f, qd = 0.0f;
+    if (jm.type == kHinge || jm.type == kSlider) {
+        int gc, gp;
+        joint_bodies(p, jm, env, gc, gp);
+        JointFrame fp = joint_frame(b, gp, jm.parent_anchor, jm.parent_frame);
+        JointFrame fc = joint_frame(b, gc, jm.child_anchor, jm.child_frame);
+        q = jm.type == kHinge ? hinge_angle(fp.rot, fc.rot)
+                              : dot(fc.point - fp.point, frame_axis(fp.rot, 0));
+        qd = joint_velocity(b, jm, gc, gp, fc, fp);
+    }
+    b.joint_q[idx] = q;
+    b.joint_qd[idx] = qd;
+}
+
 // --- per-env phases ----------------------------------------------------------
 
 PHYS_HD void contact_points(const Buffers& b, const Contact& k, V3& pa, V3& pb, V3& ra,
@@ -552,13 +868,11 @@ PHYS_HD void solve_contact_static_friction(const Params& p, const Buffers& b, Co
     // friction cone. The correction is accumulated as a vector so that
     // back-and-forth adjustments across iterations don't use up the cone.
     contact_points(b, k, pa, pb, ra, rb);
-    V3 xa0 = load3(b.prev_pos, k.a), xb0 = load3(b.prev_pos, k.b);
-    V3 pa0 = xa0 + rotate(load4(b.prev_quat, k.a), V3{k.ra[0], k.ra[1], k.ra[2]});
-    V3 pb0 = xb0 + rotate(load4(b.prev_quat, k.b), V3{k.rb[0], k.rb[1], k.rb[2]});
-    V3 slip = (pa - pa0) - (pb - pb0);
+    V3 slip = (load3(b.disp, k.a) + cross(load3(b.drot, k.a), ra)) -
+              (load3(b.disp, k.b) + cross(load3(b.drot, k.b), rb));
     V3 slip_t = slip - n * dot(slip, n);
     float len = length(slip_t);
-    if (len <= 1e-9f) return;
+    if (len <= 1e-20f) return;
     V3 dir = slip_t * (-1.0f / len);
     float w = generalized_inv_mass(p, b, k.a, load4(b.quat, k.a), ra, dir) +
               generalized_inv_mass(p, b, k.b, load4(b.quat, k.b), rb, dir);
@@ -642,19 +956,24 @@ PHYS_HD void rigid_solve_positions(const Params& p, const Buffers& b, int env) {
     }
     b.ncontact[env] = sink.count;
     int n = sink.count < p.max_contacts ? sink.count : p.max_contacts;
-    // Penetration is resolved first, over several symmetric Gauss-Seidel
-    // sweeps (alternating direction, so the fixed contact order does not
+    // Joints and penetration are resolved first, over several symmetric
+    // Gauss-Seidel sweeps (alternating direction, so the fixed order does not
     // bias resting bodies into creeping). Only then is static friction
     // applied, in a single sweep: correcting one corner of a box rotates it
     // and slides its other corners, but those slides cancel once every
     // corner has been corrected. Interleaving friction with the normal
     // iterations makes it fight those transient slides, which can exhaust
     // the friction cone of a resting box and makes tall stacks rock. A final
-    // normal sweep removes any penetration the friction pass introduced.
-    for (int it = 0; it < p.position_iterations; it++)
+    // sweep removes the joint error and penetration friction introduced.
+    for (int j = 0; j < p.njoint; j++) b.joint_lambda[env * p.njoint + j] = 0.0f;
+    for (int it = 0; it < p.position_iterations; it++) {
+        for (int j = 0; j < p.njoint; j++)
+            solve_joint_position(p, b, env, (it & 1) ? p.njoint - 1 - j : j);
         for (int k = 0; k < n; k++)
             solve_contact_position(p, b, sink.out[(it & 1) ? n - 1 - k : k]);
+    }
     for (int k = 0; k < n; k++) solve_contact_static_friction(p, b, sink.out[k]);
+    for (int j = p.njoint - 1; j >= 0; j--) solve_joint_position(p, b, env, j);
     for (int k = n - 1; k >= 0; k--) solve_contact_position(p, b, sink.out[k]);
 }
 
@@ -667,6 +986,7 @@ PHYS_HD void rigid_solve_positions(const Params& p, const Buffers& b, int env) {
 PHYS_HD void rigid_solve_velocities(const Params& p, const Buffers& b, int env) {
     Contact* contacts = b.contacts + (size_t)env * p.max_contacts;
     int n = b.ncontact[env] < p.max_contacts ? b.ncontact[env] : p.max_contacts;
+    for (int j = 0; j < p.njoint; j++) solve_joint_velocity(p, b, env, j);
     for (int it = 0; it < p.velocity_iterations; it++)
         for (int k = 0; k < n; k++)
             solve_contact_restitution(p, b, contacts[(it & 1) ? n - 1 - k : k]);

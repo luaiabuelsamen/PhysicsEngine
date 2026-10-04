@@ -16,8 +16,23 @@
 namespace phys {
 namespace detail {
 
-// Same values as phys::Shape.
-enum ShapeType : int { kSphere = 0, kCapsule = 1, kBox = 2, kPlane = 3 };
+// Same values as phys::Shape, phys::JointType and phys::Actuator.
+enum ShapeType : int { kSphere = 0, kCapsule = 1, kBox = 2, kPlane = 3, kNoShape = 4 };
+enum JointKind : int { kHinge = 0, kSlider = 1, kBall = 2, kFixed = 3 };
+enum ActuatorKind : int { kNoActuator = 0, kTorque = 1, kPositionDrive = 2, kVelocityDrive = 3 };
+
+// A joint as the solvers see it. Bodies are indices within an env; parent
+// -1 is the world, whose "local" frame is the world frame.
+struct JointModel {
+    int type, parent, child;
+    float parent_anchor[3], parent_frame[4];  // frame quaternions are w, x, y, z
+    float child_anchor[3], child_frame[4];
+    int limited;
+    float lower, upper;
+    float damping;
+    int actuator;
+    float kp, kd, max_force;
+};
 
 struct Params {
     int nenv, nbody;
@@ -36,6 +51,8 @@ struct Params {
     int sentinel_key;  // key of disabled bodies; sorts after every real cell
 
     // Rigid solver.
+    int njoint;
+    bool has_torque_actuators;
     int substeps;
     int position_iterations;
     int velocity_iterations;
@@ -95,9 +112,20 @@ struct Buffers {
     int* cell_start;          // [nenv * ncell] first sorted slot, -1 if empty
     int* cell_end;            // one past the last sorted slot
 
+    // Rigid solver model and inputs.
+    const JointModel* joints;   // [njoint]
+    const uint8_t* may_collide; // [nbody * nbody] pair filter
+    float* ctrl;                // [nenv * njoint]
+    float* joint_q;             // [nenv * njoint] outputs
+    float* joint_qd;
+
     // Rigid solver scratch.
-    float* prev_pos[3];
-    float* prev_quat[4];
+    float* joint_lambda;        // [nenv * njoint] accumulated drive correction
+    // Motion of each body within the current substep - the prediction plus
+    // every correction - kept separately so velocities can be computed as
+    // disp / h without subtracting two nearly equal positions in float32.
+    float* disp[3];  // linear displacement
+    float* drot[3];  // rotation vector
     Contact* contacts;  // [nenv * max_contacts]
     int* ncontact;      // [nenv] contacts found (may exceed max_contacts)
 };

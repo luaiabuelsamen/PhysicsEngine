@@ -2,7 +2,8 @@
 
 A rigid body physics engine in C++ and CUDA, built as a batched library (`libphys`) that steps thousands of independent environments at once — the foundation for a GPU reinforcement-learning physics engine.
 
-- **Rigid solver** (XPBD with substeps): rotating spheres, capsules, boxes and planes with friction and restitution. On the GPU it runs **~470,000 env-steps/s** (4,096 envs of 10 falling shapes each), 22x a single CPU core.
+- **Rigid solver** (XPBD with substeps): rotating spheres, capsules, boxes and planes with friction and restitution, plus **hinge, slider, ball and fixed joints** with limits and torque / PD-position / velocity actuators. On the GPU it runs **~450,000 env-steps/s** for 4,096 envs of 10 falling shapes, and **~51,000 env-steps/s** for 1,024 envs of a 12-joint actuated hand holding a cube.
+- Joint dynamics match the exact equations of motion (checked against MuJoCo) and converge at first order in the substep length.
 - **Particle solver**: 100,000+ frictionless spheres in one scene; at 100,000 bodies the GPU runs **9x faster than a hand-optimized single-threaded CPU implementation** (373 ms vs 3,393 ms).
 - The CPU and GPU backends are deterministic and produce **bit-identical** trajectories.
 
@@ -56,6 +57,30 @@ Extended Position Based Dynamics with substeps, after Macklin et al. 2020, *Deta
 
 RL environments hold few bodies, so the parallelism comes from running many envs at once; each env's contacts are solved in sequence, which keeps the result stable, deterministic and identical on CPU and GPU.
 
+Velocities are computed from each body's accumulated displacement and rotation within the substep, never from the difference of two absolute poses, so float32 cancellation doesn't limit accuracy at high substep counts.
+
+### Joints and actuators
+
+```cpp
+desc.joints.push_back(phys::JointDesc::hinge(/*parent=*/0, /*child=*/1,
+                                             /*parent_anchor=*/{0, -0.5f, 0},
+                                             /*child_anchor=*/{0, 0.5f, 0}, /*axis=*/{0, 0, 1}));
+desc.joints.back().actuator = phys::Actuator::Position;  // control = target angle
+desc.joints.back().kp = 50;  desc.joints.back().kd = 5;
+...
+world.set_controls(ctrl);              // [nenv * njoint], or write state().ctrl on the device
+world.step(1.0f / 60);
+world.get_joint_state(q, qd);          // [nenv * njoint], computed on the device
+```
+
+- **Types**: hinge, slider, ball, fixed; parent `-1` is the world. Each joint is a frame (anchor + orientation, x = axis) in both bodies, solved as XPBD position constraints (anchor, axis alignment or orientation lock, limits) in the same Gauss-Seidel sweeps as contacts.
+- **Actuators** (hinge and slider), one control value per joint:
+  - `Torque` — torque / force, applied explicitly, clamped to `max_force`
+  - `Position` — PD: a compliant XPBD constraint towards the target (compliance `1/kp`) plus velocity-level damping `kd`. Unlike explicit PD it is unconditionally stable, which matters for light, stiff finger links: a 10 g link with `kp = 50` (natural period ~0.2 ms, below the 1.7 ms substep) tracks its target to 4e-5 rad
+  - `Velocity` — target joint velocity, with force clamped to `max_force`
+- **Passive damping**, **limits**, and **collision filtering**: a joint's two bodies don't collide by default, and MuJoCo-style group / mask bits filter other pairs. `Shape::None` bodies (with an explicit inertia) have no collision geometry.
+- Hinge angles use a polynomial `atan2` so CPU and GPU stay bit-identical.
+
 Shapes are centred on their body. Capsules run along the local y axis; planes face along local +y and must be static. A body with mass <= 0 is static.
 
 ### Particle solver (`Solver::Particle`)
@@ -82,10 +107,11 @@ There are no atomics: every phase either writes only its own body (per-body phas
 
 ### Current limitations
 
-- One GPU thread solves each env's contacts, so a single large scene (dozens of bodies) runs faster on the CPU backend; the GPU pays off with many envs.
+- **Position-based joints are numerically damped at first order in the substep length**: a pendulum swinging at 1.5 rad loses 32% of its energy over 10 s at 10 substeps, 18% at 20, 9% at 40. This is inherent to (X)PBD projection. Reduced-coordinate articulations (Featherstone, as in MuJoCo and PhysX articulations) don't have it, and are the planned fix for articulated hands.
+- One GPU thread solves each env, with bodies laid out env-major, so a warp's memory accesses are strided. The hand benchmark slows down beyond ~1,024 envs (51k → 23k env-steps/s), most likely from uncoalesced access once the working set leaves L2 (not yet confirmed with a profiler). An env-interleaved layout or one thread block per env is planned; a single large scene (dozens of bodies) currently runs faster on the CPU backend.
 - Kernel launch overhead dominates small batches (40 launches per step at 10 substeps); CUDA graphs are planned.
 - Box-box manifolds are built per substep from scratch (no persistent contacts or warm starting). An elastic box bouncing exactly flat can twist slightly on its second landing.
-- No joints yet, no rolling resistance, no convex meshes.
+- No convex meshes, torsional or rolling friction, tendons or MJCF/URDF loading yet.
 
 ## Benchmark Results
 
@@ -108,6 +134,22 @@ Envs      CPU env-steps/s  GPU env-steps/s    GPU/CPU
 ```
 
 CPU is a single core. The GPU overtakes it at ~64 envs and saturates around 4,096.
+
+`./bench_envs hand` — a static palm, four fingers of three capsule links on 12 position-driven hinges (limits, `max_force`), and a 5 cm cube; every joint follows its own target trajectory, uploaded every step:
+
+```
+Envs      CPU env-steps/s  GPU env-steps/s    GPU/CPU
+----------------------------------------------------------
+1                    1492               95       0.1x
+16                   1719             1442       0.8x
+64                   1830             4897       2.7x
+256                  1834            19585      10.7x
+1024                  ---            50976        ---
+4096                  ---            22899        ---
+16384                 ---            22308        ---
+```
+
+The drop past 1,024 envs is the memory-layout limitation described above.
 
 ### Particle solver: one large scene (`./benchmark`)
 
@@ -158,7 +200,10 @@ Each test runs on both backends. They cover:
 
 - **Rigid solver** — resting and dropped spheres, boxes and capsules settle at the right height without drifting; an elastic ball bounces back to its drop height; a tilted box tips onto a face; a 5-box stack stays standing; a sliding box stops after v²/2μg (within 0.1%); torque-free tumbling conserves angular momentum; static obstacles; disabled bodies
 - **Particle solver** — elastic collisions against analytic results, momentum conservation, walls, disabled bodies
-- **Both** — GPU run-to-run determinism, bit-exact CPU/GPU parity, independence of batched environments, input validation
+- **Joints** — compound pendulum period within 0.02% of analytic, energy loss converging at first order, anchor drift < 1e-6; double pendulum and force-driven cart-pole against their exact equations of motion (integrated with RK4 in the test), with errors that shrink with the substep length (40 substeps: 0.009 rad and 0.006 rad / 0.4 mm); PD drives reach the analytic steady state under gravity; a stiff drive on a 10 g link stays stable; force-limited velocity drives accelerate at `max_force / I`; hinge and slider limits; ball and fixed joints; collision filtering
+- **Both** — GPU run-to-run determinism, bit-exact CPU/GPU parity (including actuated, contact-rich joint chains), independence of batched environments, input validation
+
+`tools/check_references_mujoco.py` checks that the exact reference models used by the joint tests agree with MuJoCo (to ~1e-13), so a wrong reference cannot make a wrong engine look right.
 
 ### Run Benchmark
 
@@ -169,7 +214,7 @@ Each test runs on both backends. They cover:
 # Custom: ./benchmark <num_bodies> [num_steps] [run_naive] [run_cpu_opt_and_ref]
 ./benchmark 100000 50 0 1
 
-# Rigid solver, batched envs: ./bench_envs [bodies_per_env] [substeps]
+# Rigid solver, batched envs: ./bench_envs [pile|hand|all] [substeps]
 ./bench_envs
 ```
 
@@ -187,7 +232,7 @@ source/
   phys/
     phys.h                  # Public API: BodyDesc, ModelDesc, HostState, World
     common.h                # Plain-data types shared by solvers and backends
-    rigid.h                 # Rigid solver: XPBD, narrowphase, friction
+    rigid.h                 # Rigid solver: XPBD, narrowphase, friction, joints
     particle.h              # Particle solver: spheres, walls, spatial hash
     world.cpp               # Model validation, inertia, grid setup, dispatch
     backend_cpu.cpp         # CPU backend (bit-exact reference)
@@ -195,7 +240,7 @@ source/
   cpu_rigid_body.cpp/h      # Hand-written CPU spatial hash baseline
   cpu_rigid_body_naive.cpp/h # Hand-written CPU O(n^2) baseline
   benchmark.cpp             # Particle solver: CPU vs GPU on one large scene
-  bench_envs.cpp            # Rigid solver: env-steps/s on batched envs
+  bench_envs.cpp            # Rigid solver: env-steps/s (falling pile, actuated hand)
   visualize_rigid.cpp       # Rigid solver demo - software-rendered GIF
   visualize.cpp             # 2D particle renderer - outputs GIF via ffmpeg
   visualize_pendulum.cpp    # GPU particle pour visualization
@@ -208,6 +253,8 @@ source/
   ode.h                     # RK4 ODE solver
 tests/
   test_phys.cpp             # libphys tests (run with ctest)
+tools/
+  check_references_mujoco.py # Validates the tests' exact reference models with MuJoCo
 CMakeLists.txt              # Build system for rigid body engine
 SConstruct                  # Build system for spring-mass visualization
 Dockerfile                  # CUDA-enabled container
