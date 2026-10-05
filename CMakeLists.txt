@@ -119,6 +119,10 @@ if(PHYS_BUILD_TESTS)
     add_executable(test_tactile tests/test_tactile.cpp)
     target_link_libraries(test_tactile PRIVATE phys)
     add_test(NAME test_tactile COMMAND test_tactile)
+
+    add_executable(test_tactile_sensor tests/test_tactile_sensor.cpp)
+    target_link_libraries(test_tactile_sensor PRIVATE phys)
+    add_test(NAME test_tactile_sensor COMMAND test_tactile_sensor)
     if(TARGET _libphys)
         add_test(NAME test_python
                  COMMAND ${Python3_EXECUTABLE} -m pytest -q ${CMAKE_CURRENT_SOURCE_DIR}/python/tests)

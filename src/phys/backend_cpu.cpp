@@ -6,6 +6,7 @@
 #include "phys/backend.h"
 #include "phys/particle.h"
 #include "phys/rigid.h"
+#include "phys/tactile_sensor.h"
 
 namespace phys {
 namespace detail {
@@ -29,6 +30,15 @@ public:
             joint_q_.assign(nj, 0.0f);
             joint_qd_.assign(nj, 0.0f);
             joint_lambda_.assign(nj, 0.0f);
+            tactile_.assign((size_t)p_.nenv * p_.ntactile * kTactileChannels, 0.0f);
+            tactile_force_.assign((size_t)p_.nenv * p_.nsensor * 3, 0.0f);
+            tactile_scratch_.assign(model_.tactile_scratch, 0.0f);
+            tactile_list_.assign(model_.tactile_list, 0);
+            tactile_accum_.assign((size_t)p_.nenv * p_.nsensor * kTactileAccum, 0.0f);
+            tactile_touch_.assign((size_t)p_.nenv * p_.nsensor * kTactileMaxTouching, -1);
+            exec_list_.assign(p_.max_sensor_cells, 0);
+            exec_vals_.assign(p_.max_sensor_cells, 0.0f);
+            exec_red_.assign(kTactileMaxThreads, 0.0f);
         } else {
             for (int a = 0; a < 3; a++) {
                 dpos_[a].assign(n_, 0.0f);
@@ -74,8 +84,12 @@ public:
             else
                 particle_step(b);
         }
-        if (p_.rigid)
+        if (p_.rigid) {
             for (int i = 0; i < p_.nenv * p_.njoint; i++) rigid_observe_joint(p_, b, i);
+            SerialExec ex{p_.tactile_threads, exec_list_.data(), exec_vals_.data(), exec_red_.data(), nullptr};
+            for (int s = 0; s < p_.nsensor; s++)
+                for (int e = 0; e < p_.nenv; e++) tactile_update(ex, p_, b, e, s);
+        }
     }
 
     void synchronize() override {}
@@ -91,13 +105,20 @@ public:
         qd = joint_qd_;
     }
 
+    void download_tactile(std::vector<float>& cells, std::vector<float>& forces) override {
+        cells = tactile_;
+        forces = tactile_force_;
+    }
+
     StateView view() override {
         return {pos_[0].data(),    pos_[1].data(),    pos_[2].data(),
                 vel_[0].data(),    vel_[1].data(),    vel_[2].data(),
                 quat_[0].data(),   quat_[1].data(),   quat_[2].data(), quat_[3].data(),
                 angvel_[0].data(), angvel_[1].data(), angvel_[2].data(),
                 enabled_.data(),   ctrl_.data(),      joint_q_.data(), joint_qd_.data(),
-                Device::CPU,       p_.nenv,           p_.nbody,        p_.njoint};
+                tactile_.data(),   tactile_force_.data(),
+                Device::CPU,       p_.nenv,           p_.nbody,        p_.njoint,
+                p_.nsensor,        p_.ntactile};
     }
 
 private:
@@ -109,6 +130,8 @@ private:
             for (int e = 0; e < p_.nenv; e++) rigid_solve_positions(p_, b, e);
             for (int g = 0; g < n_; g++) rigid_update_velocities(p_, b, g);
             for (int e = 0; e < p_.nenv; e++) rigid_solve_velocities(p_, b, e);
+            for (int s = 0; s < p_.nsensor; s++)
+                for (int e = 0; e < p_.nenv; e++) tactile_accumulate(p_, b, e, s, sub == 0);
         }
     }
 
@@ -166,6 +189,14 @@ private:
         b.joint_q = joint_q_.data();
         b.joint_qd = joint_qd_.data();
         b.joint_lambda = joint_lambda_.data();
+        b.sensors = model_.sensors.data();
+        b.tactile_kernel = model_.tactile_kernel.data();
+        b.tactile = tactile_.data();
+        b.tactile_force = tactile_force_.data();
+        b.tactile_scratch = tactile_scratch_.data();
+        b.tactile_list = tactile_list_.data();
+        b.tactile_accum = tactile_accum_.data();
+        b.tactile_touch = tactile_touch_.data();
         return b;
     }
 
@@ -182,6 +213,9 @@ private:
     std::vector<Contact> contacts_;
     std::vector<int> ncontact_;
     std::vector<float> ctrl_, joint_q_, joint_qd_, joint_lambda_;
+    std::vector<float> tactile_, tactile_force_, tactile_scratch_;
+    std::vector<int> tactile_list_, tactile_touch_, exec_list_;
+    std::vector<float> tactile_accum_, exec_vals_, exec_red_;
 };
 
 }  // namespace

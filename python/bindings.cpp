@@ -61,6 +61,10 @@ py::dict buffers(World& w) {
         d["joint_q"] = entry(v.joint_q, v.njoint, f);
         d["joint_qd"] = entry(v.joint_qd, v.njoint, f);
     }
+    if (v.nsensor > 0) {
+        d["tactile"] = entry(v.tactile, v.ntactile * World::kTactileChannels, f);
+        d["tactile_force"] = entry(v.tactile_force, v.nsensor * 3, f);
+    }
     return d;
 }
 
@@ -161,6 +165,21 @@ PYBIND11_MODULE(_libphys, m) {
         .def_static("fixed", &JointDesc::fixed, py::arg("parent"), py::arg("child"),
                     py::arg("parent_anchor"), py::arg("child_anchor"));
 
+    py::class_<TactileSensorDesc>(m, "TactileSensorDesc")
+        .def(py::init<>())
+        .def_readwrite("body", &TactileSensorDesc::body)
+        .def_readwrite("origin", &TactileSensorDesc::origin)
+        .def_readwrite("frame", &TactileSensorDesc::frame)
+        .def_readwrite("width", &TactileSensorDesc::width)
+        .def_readwrite("height", &TactileSensorDesc::height)
+        .def_readwrite("nx", &TactileSensorDesc::nx)
+        .def_readwrite("ny", &TactileSensorDesc::ny)
+        .def_readwrite("youngs_modulus", &TactileSensorDesc::youngs_modulus)
+        .def_readwrite("poisson", &TactileSensorDesc::poisson)
+        .def_readwrite("dome_radius", &TactileSensorDesc::dome_radius)
+        .def_readwrite("max_iterations", &TactileSensorDesc::max_iterations)
+        .def_readwrite("tolerance", &TactileSensorDesc::tolerance);
+
     py::class_<ModelDesc>(m, "ModelDesc")
         .def(py::init<>())
         .def_readwrite("bodies", &ModelDesc::bodies)
@@ -172,6 +191,7 @@ PYBIND11_MODULE(_libphys, m) {
         .def_readwrite("position_iterations", &ModelDesc::position_iterations)
         .def_readwrite("velocity_iterations", &ModelDesc::velocity_iterations)
         .def_readwrite("max_contacts_per_env", &ModelDesc::max_contacts_per_env)
+        .def_readwrite("tactile_sensors", &ModelDesc::tactile_sensors)
         .def_readwrite("bounds_lo", &ModelDesc::bounds_lo)
         .def_readwrite("bounds_hi", &ModelDesc::bounds_hi)
         .def_readwrite("wall_restitution", &ModelDesc::wall_restitution)
@@ -186,6 +206,8 @@ PYBIND11_MODULE(_libphys, m) {
         .def_property_readonly("device", &World::device)
         .def_property_readonly("solver", &World::solver)
         .def_property_readonly("max_contacts_per_env", &World::max_contacts_per_env)
+        .def_property_readonly("nsensor", &World::nsensor)
+        .def("sensor", &World::sensor, py::arg("index"))
         .def("step", &World::step, py::arg("dt"), py::arg("nsteps") = 1,
              py::call_guard<py::gil_scoped_release>())
         .def("synchronize", &World::synchronize, py::call_guard<py::gil_scoped_release>())

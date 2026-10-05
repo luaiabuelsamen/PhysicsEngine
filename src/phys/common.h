@@ -59,6 +59,38 @@ struct Params {
     float h;               // substep length, dt / substeps
     float rest_threshold;  // below this approach speed, contacts don't bounce
     int max_contacts;      // contact buffer capacity per env
+
+    // Tactile sensors.
+    int nsensor;
+    int ntactile;          // tactile cells per env, all sensors
+    int max_sensor_cells;  // cells of the largest sensor
+    bool tactile_shared_work;  // CUDA: tactile working arrays in shared memory
+    int tactile_threads;       // threads per tactile solve (see tactile_sensor.h)
+};
+
+// Number of output channels of a tactile sensor cell (see tactile_sensor.h).
+constexpr int kTactileChannels = 7;
+constexpr int kTactileAccum = 5;
+constexpr int kTactileMaxTouching = 4;  // bodies considered per pad
+
+// A tactile sensor pad as the solver sees it (see phys::TactileSensorDesc).
+// Cells are numbered row-major, cell (ix, iy) = iy * nx + ix, at local
+// (-half_w + (ix + 0.5) * cell_x, -half_h + (iy + 0.5) * cell_y).
+struct TactileModel {
+    int body;
+    float origin[3];   // pad centre in the body frame
+    float frame[4];    // pad frame in the body frame (w, x, y, z); +z is the outward normal
+    float half_w, half_h;
+    float cell_x, cell_y;
+    int nx, ny;
+    float dome_radius;          // > 0: the gel surface bulges out by -r^2 / 2R
+    float tangential_ratio;     // tangential / normal compliance of the gel
+    int cell_offset;            // first cell of this sensor among an env's tactile cells
+    int kernel_offset;          // into the kernel table: [ny * nx] influence coefficients
+    long long scratch_offset;   // into the float scratch: 7 * nx * ny per env
+    long long list_offset;      // into the int scratch: nx * ny per env
+    int max_iterations;
+    float tolerance;
 };
 
 // Fill in the fields that depend on the step length. Runs on the host, so
@@ -81,6 +113,7 @@ struct Contact {
     float lambda_n;              // accumulated normal correction
     float static_friction[3];    // accumulated static friction correction on a
     float friction_impulse[3];   // accumulated dynamic friction impulse on a
+    float normal_impulse;        // accumulated restitution (normal velocity) impulse on a
     float vn_pre;              // normal relative velocity when detected
     float mu, e;               // combined friction and restitution
 };
@@ -128,6 +161,19 @@ struct Buffers {
     float* drot[3];  // rotation vector
     Contact* contacts;  // [nenv * max_contacts]
     int* ncontact;      // [nenv] contacts found (may exceed max_contacts)
+
+    // Tactile sensors.
+    const TactileModel* sensors;  // [nsensor]
+    const float* tactile_kernel;  // influence coefficients, see TactileModel
+    float* tactile;               // [nenv * ntactile * kTactileChannels] outputs
+    float* tactile_force;         // [nenv * nsensor * 3] outputs
+    float* tactile_scratch;
+    int* tactile_list;
+    // Contact force on each pad summed over the substeps of the current step:
+    // [nenv * nsensor * kTactileAccum] (force x, y, z in world, sum mu lambda,
+    // sum lambda) and the bodies touching it, [nenv * nsensor * 4] (-1: none).
+    float* tactile_accum;
+    int* tactile_touch;
 };
 
 }  // namespace detail

@@ -10,9 +10,12 @@ against exact solutions, MuJoCo and real tactile-sensor data.
   actuators.
 - **Deterministic**: the CPU and CUDA backends produce bit-identical
   trajectories.
-- **Tactile contact (research)**: an elastic contact patch that reproduces
-  Hertz contact, partial slip and hysteresis, being validated on ~2,800 real
-  GelSight / DIGIT trajectories ([docs/TACTILE.md](docs/TACTILE.md)).
+- **Tactile sensors**: gel pads on any body report, every step and in every
+  env, pressure, shear, gel deflection and stick / slip maps computed from an
+  elastic half-space contact model - Hertz pressure and Mindlin partial slip,
+  not penalty springs - on the GPU at ~130k env-steps/s with a 16 x 16 pad.
+  The contact model is being validated on ~2,800 real GelSight / DIGIT
+  trajectories ([docs/TACTILE.md](docs/TACTILE.md)).
 
 C++ / CUDA core, Python front end. Developed and benchmarked on a Jetson Orin
 NX.
@@ -70,6 +73,36 @@ The same API is available in C++ (`src/phys/phys.h`): `phys::ModelDesc`,
 `phys::World`, `phys::HostState`, and `World::state()` for raw device
 pointers.
 
+## Tactile sensors
+
+```python
+finger = model.add_body(lp.Body.box((0.008, 0.008, 0.004), 0.05))
+model.add_tactile_sensor(finger, origin=(0, 0, -0.004), frame=(0, 1, 0, 0),  # pad on the -z face
+                         width=0.016, height=0.016, resolution=(24, 24), youngs_modulus=3e5)
+world = lp.World(model, num_envs=4096, device="cuda")
+world.step(1 / 240)
+tactile = world.tactile[0]     # [num_envs, 7, 24, 24], on the GPU, zero copy
+force = world.tactile_force    # [num_envs, num_sensors, 3]: shear x, shear y, normal (pad frame)
+```
+
+Channels (`lp.TACTILE_CHANNELS`): pressure, shear x / y (Pa), normal
+deflection of the gel (m, the depth map a GelSight / DIGIT camera sees),
+tangential displacement x / y (m, what markers show), and stick (1) / slip
+(0).
+
+The rigid solver decides how hard bodies press on the pad (the contact force
+on the pad's face, averaged over the step's substeps); the sensor distributes
+that force as an elastic gel would, given the touching bodies' shapes:
+pressure from the load-controlled half-space contact problem (Polonsky-Keer
+conjugate gradient), shear and the stick zone from the Ciavarella-Jaeger
+construction, exact for monotonic shear. One CUDA block per (env, sensor);
+CPU and GPU agree bit for bit.
+
+![Tactile probe](docs/media/tactile_probe.gif)
+
+`examples/tactile_probe.py`: a fingertip pressed onto, then slid across, a
+sphere, a capsule and a box edge (one per env).
+
 ## Robots: URDF and the motion planner
 
 `lp.load_urdf` builds a `Model` from a URDF: one body per link with mass,
@@ -115,7 +148,8 @@ Every number below is a test or tool in this repo.
 | Joints | Double pendulum, force-driven cart-pole vs exact equations of motion (references checked against MuJoCo to 1e-13) | 0.009 rad, 0.006 rad / 0.4 mm at 40 substeps; first-order convergence |
 | Robots | UR5e from URDF: FK vs the planner's FK (200 random configurations); held under gravity at 1e5 gain | 7e-16 m, < 1e-6 rad; 4e-4 rad, tool 0.3 mm |
 | Actuators | PD steady state under gravity; force-limited velocity drive | 2e-5 rad; 0.01% |
-| Tactile | Hertz, flat punch, Cattaneo-Mindlin, Masing hysteresis | 0.07-2% |
+| Tactile | Hertz, flat punch, Cattaneo-Mindlin, Masing hysteresis (standalone patch) | 0.07-2% |
+| Tactile | Sensor pads in `World`: pad force vs applied load; Hertz radius / peak pressure / indentation; Mindlin stick radius; full slip; CPU vs CUDA | 0.01%; 0.5% / 1% / 0.6%; within one cell; exact; bit-identical |
 | Tactile | Contact laws on real GelSight / DIGIT data | see [docs/TACTILE.md](docs/TACTILE.md) |
 | Backends | CPU vs CUDA, run-to-run, env independence | bit-identical |
 
@@ -130,6 +164,8 @@ Run them: `ctest --test-dir build` (C++ and Python tests),
 | 10 falling shapes per env, 4,096 envs (`bench_envs pile`) | 450k env-steps/s (22x one CPU core) |
 | 12-joint actuated hand + cube, 1,024 envs (`bench_envs hand`) | 51k env-steps/s |
 | 100,000 spheres in one scene, particle solver (`benchmark`) | 373 ms / 50 steps (9x a hand-optimized CPU loop) |
+| Pad pressed and dragged over a sphere, 16 x 16 tactile pad, 4,096 envs | 139k env-steps/s (965k without the sensor) |
+| Same, 32 x 32 pad | 15k env-steps/s |
 
 The GPU overtakes a single CPU core at about 64 envs. Full tables:
 `./build/bench_envs`, `./build/benchmark`.
@@ -143,7 +179,15 @@ The GPU overtakes a single CPU core at about 64 envs. Full tables:
   env-major: throughput for hand-sized envs drops beyond ~1,000 envs, and a
   single large scene runs faster on the CPU backend.
 - No mesh collision, torsional / rolling friction, MJCF loading, URDF
-  collision geometry or rendering yet. The tactile patch is not yet coupled into `World`.
+  collision geometry or rendering yet.
+- Tactile sensors are one-way: the gel's compliance does not feed back into
+  the rigid contact, so the stick-to-slip transition takes a step or two
+  instead of the ~1 mm of slide real gels show, and shear has no hysteresis
+  under reversal (the standalone `ElasticPatch` has both). Large pads are
+  slow (the influence sums are dense; FFT-based sums would fix this).
+- Stiff rigid contacts pushed through joints chatter at low substep counts
+  (the pad force scatters by ~8% step to step at 10 substeps under shear);
+  40 substeps hold them steady.
 - Kernel launch overhead dominates small batches (no CUDA graphs yet).
 
 ## Two solvers
@@ -158,9 +202,9 @@ spheres in axis-aligned walls, with a spatial-hash broadphase.
 ## Repository layout
 
 ```
-src/phys/      the library: World API, rigid / particle solvers, joints, tactile patch
+src/phys/      the library: World API, rigid / particle solvers, joints, tactile sensors, URDF import
 python/        Python package `libphys` (pybind11 bindings) and its tests
-examples/      cartpole.py; ur5e_planner (.py/.cpp); GIF demos rigid_pile, particle_bounce, particle_pour (need ffmpeg)
+examples/      cartpole.py; tactile_probe.py; ur5e_planner (.py/.cpp); GIF demos rigid_pile, particle_bounce, particle_pour (need ffmpeg)
 benchmarks/    bench_envs (batched RL envs), benchmark (particle solver vs CPU baselines)
 tests/         C++ tests
 tools/         validation: MuJoCo reference check, Sparsh tactile data analysis

@@ -12,6 +12,7 @@
 #include "phys/backend.h"
 #include "phys/particle.h"
 #include "phys/rigid.h"
+#include "phys/tactile_sensor.h"
 
 namespace phys {
 namespace detail {
@@ -98,6 +99,37 @@ __global__ void rigid_velocities_kernel(Params p, Buffers b) {
     if (e < p.nenv) rigid_solve_velocities(p, b, e);
 }
 
+__global__ void tactile_accumulate_kernel(Params p, Buffers b, bool first) {
+    int i = thread_index();
+    if (i < p.nenv * p.nsensor) tactile_accumulate(p, b, i % p.nenv, i / p.nenv, first);
+}
+
+// One block per (env, sensor), threads over the sensor's cells. Shared
+// memory holds the cell lists and influence table, and - when
+// p.tactile_shared_work - the working arrays too.
+__global__ __launch_bounds__(kTactileMaxThreads) void tactile_kernel(Params p, Buffers b) {
+    extern __shared__ float shared[];
+    const int n = p.max_sensor_cells;
+    BlockExec ex;
+    ex.red = shared;
+    ex.counts = reinterpret_cast<int*>(shared + kTactileMaxThreads / kWarp);
+    float* rest = shared + 2 * (kTactileMaxThreads / kWarp);
+    ex.list = reinterpret_cast<int*>(rest);
+    ex.vals = rest + n;
+    ex.kernel = rest + 2 * n;
+    ex.work = p.tactile_shared_work ? rest + 3 * n : nullptr;
+    ex.cand = p.tactile_shared_work ? reinterpret_cast<int*>(rest + (3 + kTactileArrays - 1) * n) : nullptr;
+    tactile_update(ex, p, b, blockIdx.x % p.nenv, blockIdx.x / p.nenv);
+}
+
+size_t tactile_shared_bytes(const Params& p) {
+    size_t arrays = p.tactile_shared_work ? 3 + (kTactileArrays - 1) + 1 : 3;
+    return (arrays * (size_t)p.max_sensor_cells + 2 * (kTactileMaxThreads / kWarp)) * sizeof(float);
+}
+
+// Keep the working arrays in shared memory when they fit comfortably.
+constexpr size_t kTactileSharedLimit = 96 * 1024;
+
 // Frees everything it holds, including when a constructor throws part way.
 struct DeviceAllocations {
     std::vector<void*> ptrs;
@@ -143,6 +175,30 @@ public:
                 alloc(buf, jb);
                 PHYS_CUDA(cudaMemset(*buf, 0, jb));
             }
+            b_.sensors = upload_model(model.sensors);
+            b_.tactile_kernel = upload_model(model.tactile_kernel);
+            size_t tb = (size_t)p_.nenv * p_.ntactile * kTactileChannels * sizeof(float);
+            size_t fb3 = (size_t)p_.nenv * p_.nsensor * 3 * sizeof(float);
+            alloc(&b_.tactile, tb);
+            alloc(&b_.tactile_force, fb3);
+            PHYS_CUDA(cudaMemset(b_.tactile, 0, tb));
+            PHYS_CUDA(cudaMemset(b_.tactile_force, 0, fb3));
+            alloc(&b_.tactile_scratch, model.tactile_scratch * sizeof(float));
+            PHYS_CUDA(cudaMemset(b_.tactile_scratch, 0, model.tactile_scratch * sizeof(float)));
+            p_.tactile_shared_work = false;
+            if (p_.nsensor > 0) {
+                Params trial = p_;
+                trial.tactile_shared_work = true;
+                p_.tactile_shared_work = tactile_shared_bytes(trial) <= kTactileSharedLimit;
+            }
+            if (p_.nsensor > 0)
+                PHYS_CUDA(cudaFuncSetAttribute(tactile_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                               (int)tactile_shared_bytes(p_)));
+            alloc(&b_.tactile_list, model.tactile_list * sizeof(int));
+            alloc(&b_.tactile_accum, (size_t)p_.nenv * p_.nsensor * kTactileAccum * sizeof(float));
+            alloc(&b_.tactile_touch, (size_t)p_.nenv * p_.nsensor * kTactileMaxTouching * sizeof(int));
+            PHYS_CUDA(cudaMemset(b_.tactile_accum, 0, (size_t)p_.nenv * p_.nsensor * kTactileAccum * sizeof(float)));
+            PHYS_CUDA(cudaMemset(b_.tactile_touch, 0xff, (size_t)p_.nenv * p_.nsensor * kTactileMaxTouching * sizeof(int)));
         } else {
             for (int a = 0; a < 3; a++) {
                 alloc(&b_.dpos[a], fb);
@@ -180,6 +236,9 @@ public:
         }
         int nj = p_.nenv * p_.njoint;
         if (p_.rigid && nj > 0) rigid_observe_kernel<<<blocks_for(nj), kThreads>>>(p_, b_, nj);
+        int ns = p_.nenv * p_.nsensor;
+        if (p_.rigid && ns > 0)
+            tactile_kernel<<<ns, p_.tactile_threads, tactile_shared_bytes(p_)>>>(p_, b_);
         PHYS_CUDA(cudaGetLastError());
     }
 
@@ -197,12 +256,18 @@ public:
         copy_out(qd, b_.joint_qd);
     }
 
+    void download_tactile(std::vector<float>& cells, std::vector<float>& forces) override {
+        copy_out(cells, b_.tactile);
+        copy_out(forces, b_.tactile_force);
+    }
+
     StateView view() override {
         return {b_.pos[0],    b_.pos[1],    b_.pos[2],    b_.vel[0],     b_.vel[1],
                 b_.vel[2],    b_.quat[0],   b_.quat[1],   b_.quat[2],    b_.quat[3],
                 b_.angvel[0], b_.angvel[1], b_.angvel[2], b_.enabled,    b_.ctrl,
-                b_.joint_q,   b_.joint_qd,  Device::CUDA, p_.nenv,       p_.nbody,
-                p_.njoint};
+                b_.joint_q,   b_.joint_qd,  b_.tactile,   b_.tactile_force,
+                Device::CUDA, p_.nenv,      p_.nbody,     p_.njoint,     p_.nsensor,
+                p_.ntactile};
     }
 
 private:
@@ -216,6 +281,9 @@ private:
             rigid_positions_kernel<<<env_blocks, kEnvThreads>>>(p_, b_);
             rigid_update_velocities_kernel<<<body_blocks, kThreads>>>(p_, b_, n_);
             rigid_velocities_kernel<<<env_blocks, kEnvThreads>>>(p_, b_);
+            int ns = p_.nenv * p_.nsensor;
+            if (ns > 0)
+                tactile_accumulate_kernel<<<blocks_for(ns, kEnvThreads), kEnvThreads>>>(p_, b_, sub == 0);
         }
     }
 

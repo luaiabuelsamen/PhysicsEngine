@@ -242,6 +242,7 @@ PHYS_HD void emit_contact(ContactSink& s, int a, int c, V3 pa, V3 pb, V3 n) {
         k.lambda_n = 0.0f;
         k.static_friction[0] = k.static_friction[1] = k.static_friction[2] = 0.0f;
         k.friction_impulse[0] = k.friction_impulse[1] = k.friction_impulse[2] = 0.0f;
+        k.normal_impulse = 0.0f;
         k.vn_pre = dot(va - vb, n);
         k.mu = 0.5f * (b.friction[ia] + b.friction[ib]);
         k.e = 0.5f * (b.restitution[ia] + b.restitution[ib]);
@@ -903,8 +904,8 @@ PHYS_HD V3 relative_velocity(const Buffers& b, const Contact& k, V3 ra, V3 rb) {
 }
 
 // Velocity-level dynamic friction for one contact. The normal impulse over
-// the substep is lambda_n / h, so the friction impulse is capped at
-// mu * lambda_n / h. It accumulates across iterations, with the total kept
+// the substep is lambda_n / h plus the restitution impulse, so the friction
+// impulse is capped at mu times that. It accumulates across iterations, with the total kept
 // inside the friction cone.
 PHYS_HD void solve_contact_friction(const Params& p, const Buffers& b, Contact& k) {
     if (k.lambda_n <= 0.0f) return;  // not touching this substep
@@ -921,7 +922,10 @@ PHYS_HD void solve_contact_friction(const Params& p, const Buffers& b, Contact& 
     if (w <= 0.0f) return;
     V3 old_total = {k.friction_impulse[0], k.friction_impulse[1], k.friction_impulse[2]};
     V3 total = old_total + t * (-vt_len / w);
-    float limit = k.mu * k.lambda_n / p.h;
+    // The normal impulse is the position solve's push (lambda_n / h) plus the
+    // restitution solve's correction, which is negative when it removes the
+    // separating velocity the push left behind.
+    float limit = k.mu * fmaxf(k.lambda_n / p.h + k.normal_impulse, 0.0f);
     float total_len = length(total);
     if (total_len > limit) total = total * (limit / total_len);
     apply_contact_impulse(p, b, k, ra, rb, total - old_total);
@@ -933,7 +937,7 @@ PHYS_HD void solve_contact_friction(const Params& p, const Buffers& b, Contact& 
 // Velocity-level restitution for one contact: sets the normal relative
 // velocity to -e times the approach speed. Slow contacts don't bounce, so
 // resting bodies settle.
-PHYS_HD void solve_contact_restitution(const Params& p, const Buffers& b, const Contact& k) {
+PHYS_HD void solve_contact_restitution(const Params& p, const Buffers& b, Contact& k) {
     if (k.lambda_n <= 0.0f) return;
     V3 n = {k.n[0], k.n[1], k.n[2]};
     V3 pa, pb, ra, rb;
@@ -943,7 +947,10 @@ PHYS_HD void solve_contact_restitution(const Params& p, const Buffers& b, const 
     float dvn = fmaxf(-e * k.vn_pre, 0.0f) - vn;
     float w = generalized_inv_mass(p, b, k.a, load4(b.quat, k.a), ra, n) +
               generalized_inv_mass(p, b, k.b, load4(b.quat, k.b), rb, n);
-    if (w > 0.0f) apply_contact_impulse(p, b, k, ra, rb, n * (dvn / w));
+    if (w > 0.0f) {
+        apply_contact_impulse(p, b, k, ra, rb, n * (dvn / w));
+        k.normal_impulse += dvn / w;
+    }
 }
 
 PHYS_HD void rigid_solve_positions(const Params& p, const Buffers& b, int env) {
