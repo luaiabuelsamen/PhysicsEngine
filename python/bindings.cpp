@@ -13,6 +13,14 @@
 
 #include "phys/phys.h"
 #include "phys/tactile.h"
+#ifdef PHYS_HAS_URDF
+#include "phys/urdf.h"
+#endif
+#ifdef PHYS_HAS_PLANNER
+#include <pybind11/eigen.h>
+
+#include "robot.hpp"
+#endif
 
 namespace py = pybind11;
 using namespace phys;
@@ -255,4 +263,87 @@ PYBIND11_MODULE(_libphys, m) {
             return a;
         })
         .def("contact_cells", &ElasticPatch::contact_cells);
+
+#ifdef PHYS_HAS_URDF
+    py::class_<UrdfOptions>(m, "UrdfOptions")
+        .def(py::init<>())
+        .def_readwrite("base_position", &UrdfOptions::base_position)
+        .def_readwrite("base_rotation", &UrdfOptions::base_rotation)
+        .def_readwrite("gravity", &UrdfOptions::gravity)
+        .def_readwrite("actuator", &UrdfOptions::actuator)
+        .def_readwrite("kp", &UrdfOptions::kp)
+        .def_readwrite("kd", &UrdfOptions::kd)
+        .def_readwrite("effort_limits", &UrdfOptions::effort_limits)
+        .def_readwrite("joint_damping", &UrdfOptions::joint_damping)
+        .def_readwrite("sphere_radius", &UrdfOptions::sphere_radius);
+
+    py::class_<UrdfModel>(m, "UrdfModel")
+        .def_readwrite("model", &UrdfModel::model)
+        .def_readonly("body_links", &UrdfModel::body_links)
+        .def_readonly("joint_names", &UrdfModel::joint_names)
+        .def_readonly("lower", &UrdfModel::lower)
+        .def_readonly("upper", &UrdfModel::upper)
+        .def_property_readonly("num_dofs", &UrdfModel::num_dofs)
+        .def("link_pose", [](const UrdfModel& u, const std::string& link, const std::vector<double>& q) {
+            Pose p = u.link_pose(link, q);
+            return py::make_tuple(py::make_tuple(p.p[0], p.p[1], p.p[2]),
+                                  py::make_tuple(p.q[0], p.q[1], p.q[2], p.q[3]));
+        }, py::arg("link"), py::arg("q"), "World pose ((x, y, z), (w, x, y, z)) of a link for joint positions q")
+        .def("body_poses", [](const UrdfModel& u, const std::vector<double>& q) {
+            // [num_bodies, 7]: position and quaternion (w, x, y, z) of every body at rest at q.
+            HostState s((int)u.model.bodies.size());
+            u.set_configuration(s, 0, q);
+            py::array_t<float> a({s.size(), 7});
+            auto r = a.mutable_unchecked<2>();
+            for (int i = 0; i < s.size(); i++) {
+                float v[7] = {s.px[i], s.py[i], s.pz[i], s.qw[i], s.qx[i], s.qy[i], s.qz[i]};
+                for (int k = 0; k < 7; k++) r(i, k) = v[k];
+            }
+            return a;
+        }, py::arg("q"));
+    m.def("load_urdf", &load_urdf, py::arg("path"), py::arg("options") = UrdfOptions());
+#endif
+
+#ifdef PHYS_HAS_PLANNER
+    // The C++ motion planner (extern/MotionPlanning): FK / IK / MoveJ / MoveL.
+    py::class_<Robot>(m, "Planner")
+        .def(py::init([](const std::string& urdf, double dt, const std::string& tip_link) {
+                 auto r = new Robot(urdf, tip_link);
+                 OptimizerConfig cfg = r->getOptimizerConfig();
+                 cfg.dt = dt;
+                 r->setOptimizerConfig(cfg);
+                 return r;
+             }),
+             py::arg("urdf"), py::arg("dt") = 0.01, py::arg("tip_link") = "")
+        .def_property_readonly("dof", &Robot::getDOF)
+        .def_property_readonly("joint_names", &Robot::getJointNames)
+        .def("fk", [](Robot& r, const std::vector<double>& q) {
+            auto p = r.getEndEffectorPose(q);
+            return py::make_tuple(py::make_tuple(p.first.x(), p.first.y(), p.first.z()),
+                                  py::make_tuple(p.second.w(), p.second.x(), p.second.y(), p.second.z()));
+        }, py::arg("q"), "Tip pose ((x, y, z), (w, x, y, z))")
+        .def("ik", [](Robot& r, const std::vector<double>& pos, const std::vector<double>& quat,
+                      const std::vector<double>& guess) {
+            bool converged = false;
+            auto q = r.computeIK(Vector3(pos[0], pos[1], pos[2]),
+                                 Quaternion(quat[0], quat[1], quat[2], quat[3]), guess, &converged);
+            return py::make_tuple(q, converged);
+        }, py::arg("position"), py::arg("quaternion"), py::arg("initial_guess") = std::vector<double>(),
+           "(q, converged)")
+        .def("move_j", [](Robot& r, const std::vector<double>& start, const std::vector<double>& goal,
+                          size_t waypoints) {
+            Trajectory t = r.moveJ(start, goal, waypoints);
+            return py::make_tuple(t.getPositionMatrix(), t.success);
+        }, py::arg("start"), py::arg("goal"), py::arg("waypoints") = 50,
+           "Minimum-jerk joint-space trajectory: (plan [waypoints, dof], success)")
+        .def("move_l", [](Robot& r, const std::vector<double>& start, const std::vector<double>& pos,
+                          const std::vector<double>& quat, size_t waypoints) {
+            Trajectory t = r.moveL(start, Vector3(pos[0], pos[1], pos[2]),
+                                   Quaternion(quat[0], quat[1], quat[2], quat[3]), waypoints);
+            return py::make_tuple(t.getPositionMatrix(), t.success);
+        }, py::arg("start"), py::arg("goal_position"), py::arg("goal_quaternion"), py::arg("waypoints") = 50,
+           "Straight-line Cartesian trajectory: (plan [waypoints, dof], success). success is False if IK "
+           "failed somewhere along the line")
+        .def_property_readonly("dt", [](Robot& r) { return r.getOptimizerConfig().dt; });
+#endif
 }

@@ -24,8 +24,34 @@ from ._libphys import (Actuator, Broadphase, BodyDesc, Device, ElasticPatch, Ela
                        JointDesc, JointType, ModelDesc, Quat, Shape, Solver, Vec3)
 from . import _libphys
 
+# Optional parts, present when built with tinyxml2 / the motion planner.
+UrdfModel = getattr(_libphys, "UrdfModel", None)
+Planner = getattr(_libphys, "Planner", None)
+
+
+def load_urdf(path, **options):
+    """Robot model from a URDF: returns a UrdfModel whose .model can be passed
+    to World. Options: base_position, base_rotation, gravity (default z-up),
+    actuator ("position", "torque", "velocity"), kp, kd, effort_limits,
+    joint_damping, sphere_radius."""
+    if not hasattr(_libphys, "load_urdf"):
+        raise RuntimeError("libphys was built without URDF support (needs tinyxml2)")
+    opts = _libphys.UrdfOptions()
+    for name, value in options.items():
+        if name == "actuator":
+            value = _ACTUATORS[value]
+        elif name in ("base_position", "gravity"):
+            value = Vec3(value)
+        elif name == "base_rotation":
+            value = Quat(value)
+        if not hasattr(opts, name):
+            raise AttributeError(f"unknown URDF option {name!r}")
+        setattr(opts, name, value)
+    return _libphys.load_urdf(path, opts)
+
 __all__ = ["Model", "World", "Body", "Joint", "Actuator", "Broadphase", "Device", "Shape", "Solver",
-           "JointType", "ElasticPatch", "ElasticPatchDesc", "Indenter", "Vec3", "Quat"]
+           "JointType", "ElasticPatch", "ElasticPatchDesc", "Indenter", "Vec3", "Quat", "load_urdf",
+           "UrdfModel", "Planner"]
 
 Body = BodyDesc
 Joint = JointDesc
@@ -187,3 +213,17 @@ class World:
     def contact_counts(self):
         """Contacts found per env in the last substep (rigid solver)."""
         return self._world.contact_counts()
+
+    def set_configuration(self, robot, q, envs=None):
+        """Place a URDF robot (built into this World's model) at joint positions
+        q, at rest, in the given envs (default: all). Bodies are assumed to be
+        the robot's, in order, starting at body 0."""
+        import torch
+        poses = torch.as_tensor(robot.body_poses(list(map(float, q))), device=self.state.px.device)
+        n = poses.shape[0]
+        idx = slice(None) if envs is None else envs
+        s = self.state
+        for k, field in enumerate((s.px, s.py, s.pz, s.qw, s.qx, s.qy, s.qz)):
+            field[idx, :n] = poses[:, k]
+        for field in (s.vx, s.vy, s.vz, s.wx, s.wy, s.wz):
+            field[idx, :n] = 0.0
