@@ -44,12 +44,17 @@ public:
         }
     }
 
+    // Copies in place, so the pointers handed out by view() stay valid.
     void upload(const HostState& s) override {
-        pos_[0] = s.px; pos_[1] = s.py; pos_[2] = s.pz;
-        vel_[0] = s.vx; vel_[1] = s.vy; vel_[2] = s.vz;
-        quat_[0] = s.qw; quat_[1] = s.qx; quat_[2] = s.qy; quat_[3] = s.qz;
-        angvel_[0] = s.wx; angvel_[1] = s.wy; angvel_[2] = s.wz;
-        enabled_ = s.enabled;
+        auto in = [](const auto& src, auto& dst) {
+            dst.resize(src.size());
+            std::copy(src.begin(), src.end(), dst.begin());
+        };
+        in(s.px, pos_[0]); in(s.py, pos_[1]); in(s.pz, pos_[2]);
+        in(s.vx, vel_[0]); in(s.vy, vel_[1]); in(s.vz, vel_[2]);
+        in(s.qw, quat_[0]); in(s.qx, quat_[1]); in(s.qy, quat_[2]); in(s.qz, quat_[3]);
+        in(s.wx, angvel_[0]); in(s.wy, angvel_[1]); in(s.wz, angvel_[2]);
+        in(s.enabled, enabled_);
     }
 
     void download(HostState& s) override {

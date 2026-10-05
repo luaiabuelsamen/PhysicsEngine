@@ -1,0 +1,189 @@
+"""libphys: batched rigid-body physics for robot learning, with validated
+tactile contact.
+
+    import libphys as lp
+
+    model = lp.Model(substeps=10)
+    model.add_body(lp.Body.plane())
+    box = model.add_body(lp.Body.box((0.1, 0.1, 0.1), mass=1.0))
+    world = lp.World(model, num_envs=4096, device="cuda")
+
+    world.state.py[:, box] = 0.5      # zero-copy torch views of the state
+    world.step(1 / 60)
+    heights = world.state.py[:, box]
+
+State, controls and joint readings are torch tensors that alias the
+simulator's own buffers (on the GPU for device="cuda"): writing to them sets
+the state, and they reflect every step without copies. Kernels and torch
+share CUDA's default stream, so reads and writes are ordered with steps.
+"""
+
+import ctypes
+
+from ._libphys import (Actuator, Broadphase, BodyDesc, Device, ElasticPatch, ElasticPatchDesc, Indenter,
+                       JointDesc, JointType, ModelDesc, Quat, Shape, Solver, Vec3)
+from . import _libphys
+
+__all__ = ["Model", "World", "Body", "Joint", "Actuator", "Broadphase", "Device", "Shape", "Solver",
+           "JointType", "ElasticPatch", "ElasticPatchDesc", "Indenter", "Vec3", "Quat"]
+
+Body = BodyDesc
+Joint = JointDesc
+
+_ACTUATORS = {"none": Actuator.None_, "torque": Actuator.Torque, "position": Actuator.Position,
+              "velocity": Actuator.Velocity}
+
+
+class Model:
+    """Scene description shared by every env: bodies, joints and solver
+    settings. Bodies and joints are numbered in the order they are added."""
+
+    def __init__(self, gravity=(0.0, -9.81, 0.0), solver="rigid", **settings):
+        self.desc = ModelDesc()
+        self.desc.gravity = Vec3(gravity)
+        self.desc.solver = {"rigid": Solver.Rigid, "particle": Solver.Particle}[solver]
+        for name, value in settings.items():
+            if not hasattr(self.desc, name):
+                raise AttributeError(f"unknown model setting {name!r}")
+            setattr(self.desc, name, value)
+        self.bodies = []
+        self.joints = []
+
+    def add_body(self, body, friction=None, restitution=None):
+        """Add a body (lp.Body.sphere / capsule / box / plane / none); returns its index."""
+        if friction is not None:
+            body.friction = friction
+        if restitution is not None:
+            body.restitution = restitution
+        self.bodies.append(body)
+        return len(self.bodies) - 1
+
+    def add_joint(self, joint, actuator=None, kp=None, kd=None, max_force=None, limits=None, damping=None):
+        """Add a joint (lp.Joint.hinge / slider / ball / fixed); returns its index.
+        actuator: "torque", "position" (PD with kp, kd) or "velocity";
+        limits: (lower, upper)."""
+        if actuator is not None:
+            joint.actuator = _ACTUATORS[actuator]
+        for name, value in (("kp", kp), ("kd", kd), ("max_force", max_force), ("damping", damping)):
+            if value is not None:
+                setattr(joint, name, value)
+        if limits is not None:
+            joint.limited = True
+            joint.lower, joint.upper = limits
+        self.joints.append(joint)
+        return len(self.joints) - 1
+
+    def build(self):
+        self.desc.bodies = self.bodies
+        self.desc.joints = self.joints
+        return self.desc
+
+
+class _Buffer:
+    """Exposes one simulator buffer through __cuda_array_interface__ so that
+    torch.as_tensor wraps it without copying; holds the World alive."""
+
+    def __init__(self, owner, ptr, shape, typestr):
+        self._owner = owner
+        self.__cuda_array_interface__ = {"shape": shape, "typestr": typestr, "data": (ptr, False),
+                                         "version": 3, "strides": None}
+
+
+def _view(owner, ptr, shape, typestr, cuda):
+    import torch
+    if cuda:
+        return torch.as_tensor(_Buffer(owner, ptr, shape, typestr), device="cuda")
+    import numpy as np
+    count = shape[0] * shape[1]
+    ctype = ctypes.c_float if typestr == "<f4" else ctypes.c_uint8
+    raw = (ctype * count).from_address(ptr)
+    raw._owner = owner  # keep the World alive as long as the array
+    dtype = np.float32 if typestr == "<f4" else np.uint8
+    return torch.from_numpy(np.frombuffer(raw, dtype=dtype).reshape(shape))
+
+
+class State:
+    """Per-env body state as [num_envs, num_bodies] tensors: position px, py,
+    pz; linear velocity vx, vy, vz; orientation quaternion qw, qx, qy, qz;
+    angular velocity wx, wy, wz (world frame); enabled (uint8)."""
+
+    _FIELDS = ("px", "py", "pz", "vx", "vy", "vz", "qw", "qx", "qy", "qz", "wx", "wy", "wz", "enabled")
+
+    def __init__(self, views):
+        for name in self._FIELDS:
+            setattr(self, name, views[name])
+
+    def positions(self):
+        import torch
+        return torch.stack((self.px, self.py, self.pz), dim=-1)
+
+    def set_positions(self, p):
+        self.px.copy_(p[..., 0]); self.py.copy_(p[..., 1]); self.pz.copy_(p[..., 2])
+
+    def velocities(self):
+        import torch
+        return torch.stack((self.vx, self.vy, self.vz), dim=-1)
+
+    def set_velocities(self, v):
+        self.vx.copy_(v[..., 0]); self.vy.copy_(v[..., 1]); self.vz.copy_(v[..., 2])
+
+    def orientations(self):
+        import torch
+        return torch.stack((self.qw, self.qx, self.qy, self.qz), dim=-1)
+
+    def set_orientations(self, q):
+        self.qw.copy_(q[..., 0]); self.qx.copy_(q[..., 1]); self.qy.copy_(q[..., 2]); self.qz.copy_(q[..., 3])
+
+    def angular_velocities(self):
+        import torch
+        return torch.stack((self.wx, self.wy, self.wz), dim=-1)
+
+    def set_angular_velocities(self, w):
+        self.wx.copy_(w[..., 0]); self.wy.copy_(w[..., 1]); self.wz.copy_(w[..., 2])
+
+
+class World:
+    """num_envs independent copies of a Model, stepped together on "cuda" or
+    "cpu".
+
+    world.state      State of torch views, [num_envs, num_bodies]
+    world.ctrl       actuator inputs, [num_envs, num_joints] (writable)
+    world.joint_q    joint positions after the last step, [num_envs, num_joints]
+    world.joint_qd   joint velocities after the last step
+    """
+
+    def __init__(self, model, num_envs=1, device="cuda"):
+        desc = model.build() if isinstance(model, Model) else model
+        self.device = device
+        dev = {"cuda": Device.CUDA, "cpu": Device.CPU}[device]
+        self._world = _libphys.World(desc, num_envs, dev)
+        cuda = dev == Device.CUDA
+        views = {name: _view(self, ptr, tuple(shape), typestr, cuda)
+                 for name, (ptr, shape, typestr) in self._world._buffers().items()}
+        self.state = State(views)
+        self.ctrl = views.get("ctrl")
+        self.joint_q = views.get("joint_q")
+        self.joint_qd = views.get("joint_qd")
+
+    @property
+    def num_envs(self):
+        return self._world.nenv
+
+    @property
+    def num_bodies(self):
+        return self._world.nbody
+
+    @property
+    def num_joints(self):
+        return self._world.njoint
+
+    def step(self, dt, steps=1):
+        """Advance every env by `steps` steps of length dt (asynchronous on CUDA)."""
+        self._world.step(dt, steps)
+
+    def synchronize(self):
+        self._world.synchronize()
+
+    def contact_counts(self):
+        """Contacts found per env in the last substep (rigid solver)."""
+        return self._world.contact_counts()

@@ -1,7 +1,8 @@
 .vscode
-exe/*
-*.dblite
 *.o
 venv/
 __pycache__/
 build/
+data/
+python/libphys/*.so
+.pytest_cache/
