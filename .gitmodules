@@ -1,0 +1,3 @@
+[submodule "extern/MotionPlanning"]
+	path = extern/MotionPlanning
+	url = https://github.com/luaiabuelsamen/MotionPlanning.git

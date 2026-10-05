@@ -70,6 +70,39 @@ The same API is available in C++ (`src/phys/phys.h`): `phys::ModelDesc`,
 `phys::World`, `phys::HostState`, and `World::state()` for raw device
 pointers.
 
+## Robots: URDF and the motion planner
+
+`lp.load_urdf` builds a `Model` from a URDF: one body per link with mass,
+at the link's centre of mass and along the principal axes of its inertia,
+revolute / continuous / prismatic joints with the URDF limits and effort
+limits, and fixed joints merged (tool frames) or welded. Collision geometry
+is not imported yet (`sphere_radius=` gives a rough sphere per link).
+
+The planner in `extern/MotionPlanning` (a submodule: `git submodule update
+--init`) is exposed as `lp.Planner`: forward / inverse kinematics, `move_j`
+(minimum-jerk joint-space) and `move_l` (straight Cartesian line). Plan on
+the CPU, execute in thousands of envs on the GPU:
+
+```python
+robot = lp.load_urdf(urdf, kp=2e5, kd=2e3)          # dynamics, position actuators
+planner = lp.Planner(urdf, dt=0.04)                 # kinematics, trajectories
+plan, ok = planner.move_j(home, goal, 60)           # [waypoints, dof]; ok: reachable / IK converged
+plan = torch.tensor(plan, device="cuda")
+world = lp.World(robot.model, num_envs=1024, device="cuda")
+world.set_configuration(robot, home)
+world.ctrl[:] = plan[i]                              # joint targets, then world.step(...)
+```
+
+`examples/ur5e_planner.py` (and `.cpp`) plans a random MoveJ / MoveL per env
+for a UR5e and tracks it under gravity: tracking error 0.0007 rad median,
+tool within 0.1 mm of the plan's goal, ~100k env-steps/s from Python with
+512 envs. Needs Eigen3 and tinyxml2 (`apt install libeigen3-dev
+libtinyxml2-dev`); without them the rest of libphys builds as before.
+
+`move_j` / `move_l` return `(plan, success)`; `success` is False when the
+goal is outside the joint limits or IK failed along the line, so a plan can
+be dropped instead of executed. The planner does no collision checking.
+
 ## What is validated
 
 Every number below is a test or tool in this repo.
@@ -80,6 +113,7 @@ Every number below is a test or tool in this repo.
 | Contacts | Box resting / dropped, 5-box stack, tipping box, capsule at rest | no drift > 0.1 mm; stack stands |
 | Joints | Pendulum period vs analytic | 0.02% |
 | Joints | Double pendulum, force-driven cart-pole vs exact equations of motion (references checked against MuJoCo to 1e-13) | 0.009 rad, 0.006 rad / 0.4 mm at 40 substeps; first-order convergence |
+| Robots | UR5e from URDF: FK vs the planner's FK (200 random configurations); held under gravity at 1e5 gain | 7e-16 m, < 1e-6 rad; 4e-4 rad, tool 0.3 mm |
 | Actuators | PD steady state under gravity; force-limited velocity drive | 2e-5 rad; 0.01% |
 | Tactile | Hertz, flat punch, Cattaneo-Mindlin, Masing hysteresis | 0.07-2% |
 | Tactile | Contact laws on real GelSight / DIGIT data | see [docs/TACTILE.md](docs/TACTILE.md) |
@@ -108,8 +142,8 @@ The GPU overtakes a single CPU core at about 64 envs. Full tables:
 - Each env's contacts are solved by one GPU thread, with bodies laid out
   env-major: throughput for hand-sized envs drops beyond ~1,000 envs, and a
   single large scene runs faster on the CPU backend.
-- No mesh collision, torsional / rolling friction, MJCF / URDF loading or
-  rendering yet. The tactile patch is not yet coupled into `World`.
+- No mesh collision, torsional / rolling friction, MJCF loading, URDF
+  collision geometry or rendering yet. The tactile patch is not yet coupled into `World`.
 - Kernel launch overhead dominates small batches (no CUDA graphs yet).
 
 ## Two solvers
@@ -126,11 +160,12 @@ spheres in axis-aligned walls, with a spatial-hash broadphase.
 ```
 src/phys/      the library: World API, rigid / particle solvers, joints, tactile patch
 python/        Python package `libphys` (pybind11 bindings) and its tests
-examples/      cartpole.py; GIF demos rigid_pile, particle_bounce, particle_pour (need ffmpeg)
+examples/      cartpole.py; ur5e_planner (.py/.cpp); GIF demos rigid_pile, particle_bounce, particle_pour (need ffmpeg)
 benchmarks/    bench_envs (batched RL envs), benchmark (particle solver vs CPU baselines)
 tests/         C++ tests
 tools/         validation: MuJoCo reference check, Sparsh tactile data analysis
 docs/          TACTILE.md, media
+extern/        MotionPlanning (submodule): the motion planner
 legacy/        earlier experiments (spring-mass visualizer, PINN, chaos demo); not built
 ```
 

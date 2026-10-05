@@ -91,19 +91,53 @@ settle: the shear behaviour at the contact itself. That needs measurements
 taken *at* the gel - the tactile images (contact area, and the slip region on
 marker-based gels), or a sensor with a stiff, known mount.
 
+**4. Measured at the gel, the contact radius grows between the two models'
+predictions** (`tools/sparsh_contact_area.py`, GelSight Mini, hemisphere
+probe). For a sphere the contact radius scales as a ~ F^beta with beta = 1/3
+on an elastic half-space and 1/4 for independent springs; the exponent does
+not depend on probe size, stiffness or rig compliance. The images show the
+imprint as a ring (the camera sees surface slope, which peaks at the contact
+edge for both models), so the ring's radius is measured in every frame of
+the press and fitted against the measured force.
+
+The rings are small (7 -> 12 px), and blur biases the measured exponent
+upward, so the tool also runs the identical measurement on synthetic images
+rendered from each model's exact surface shape at the same scale, contrast
+and noise:
+
+| | Batch 1 (81 trajectories) | Batch 2 (82 trajectories) |
+|---|---|---|
+| Real data | **0.326 +- 0.007** | **0.315 +- 0.010** |
+| Hertz images, same measurement | 0.366 | 0.366 |
+| Winkler images, same measurement | 0.297 | 0.298 |
+
+The gel sits between a semi-infinite elastic solid and independent springs,
+somewhat closer to the springs; both pure models are off by several standard
+errors. The likely physics is the gel's finite thickness - a layer a few
+millimetres thick bonded to a rigid backing behaves between the two when the
+contact radius is comparable to the thickness - but this rests on assuming
+the image signal is proportional to surface slope, and the press-phase force
+exponent (finding 1) does not obviously fit the same explanation. A
+finite-layer model checked against both observables is the next step.
+
 ## Reproducing
 
 ```bash
 cmake -B build && cmake --build build -j
 python3 tools/sparsh_contact_laws.py --data data/sparsh
 PHYS_TACTILE_LIB=build/libphys_tactile.so python3 tools/sparsh_validate.py --sensor gelsight --probe sphere
+# needs a batch's tactile images (dataset_gelsight_0*.pkl, ~230 MB) in data/sparsh/images
+python3 tools/sparsh_contact_area.py --batch 1
 ```
 
 ## Open questions
 
-- Validate shear at the gel itself: predicted contact area and stick / slip
-  regions against the tactile images in the Sparsh datasets, or marker
-  displacement fields on marker-based gels.
+- A finite-thickness layer model (layered half-space kernels), checked
+  against both the press exponent and the contact-radius exponent.
+- Verify the image model (signal proportional to surface slope) with a
+  photometric model of the sensor, or with depth reconstructions.
+- Shear at the gel itself: stick / slip regions from marker displacement
+  fields on marker-based gels.
 - All fits push the probe radius to the top of its range (30 mm): the probe
   geometry is unknown, and the data may also reflect gel thickness effects
   that a half-space ignores.
