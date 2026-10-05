@@ -48,6 +48,60 @@ Checked against exact solutions (`tests/test_tactile.cpp`):
 | Winkler sphere force / brush shear curve | 1.3% / 0.2% |
 | Holder in series with a Cattaneo-Mindlin contact | 0.4% |
 
+## Tactile sensors in World
+
+`src/phys/tactile_sensor.h`, `phys::TactileSensorDesc` / `Model.add_tactile_sensor`:
+the same half-space gel, as pads on rigid bodies, solved for every env on
+the GPU.
+
+The coupling is one-way and load-controlled:
+
+1. **The rigid solver sets the load.** The force on a pad is the contact
+   force on its face, averaged over the step's substeps: the position
+   solve's multipliers, the velocity solve's restitution impulses and
+   friction. A single substep's contact force can alternate between zero and
+   twice the mean as Gauss-Seidel settles a resting contact; the substep
+   average is steady.
+2. **The touching bodies give the gap field.** Rays are cast along the pad
+   normal from every cell against the shapes of the bodies touching the pad.
+3. **The sensor solves the contact problem for that load.** It finds P >= 0
+   with sum P = W such that the deformed gap h + K P is equal to the
+   approach over the contact and no smaller elsewhere (Polonsky & Keer 1999,
+   conjugate gradient). The solve is warm-started from the last step and
+   converges in 5-15 iterations.
+4. **Shear: q = mu (P - P*) Q / |Q|.** P* solves the same problem at the
+   reduced load W - |Q| / mu (Ciavarella 1998; Jaeger 1998). The cells
+   where P* > 0 stick. This is exact for a monotonically applied shear here,
+   because the normal and the angle-averaged tangential kernels are
+   proportional. Within 2% of the friction cone the whole contact slides,
+   which covers the scatter of the rigid solver's sliding friction.
+
+Checked in `tests/test_tactile_sensor.cpp`. A pad on a box is pressed onto a
+fixed sphere by slider forces:
+
+| Check | Result |
+|---|---|
+| Pad force vs applied load (0.5, 1, 2 N) | 0.01-0.02% |
+| Hertz contact radius / peak pressure / indentation at 1 N | 0.5% / 1% / 0.6% |
+| Mindlin stick radius at Q / mu W = 0.3, 0.6, 0.8 | within one cell (0.375 mm) |
+| Full slip: every cell slides, abs(q) proportional to p, Q = mu W | exact |
+| Flat pad on a floor: load, full contact, edge pressure rise | 0.01%; 400 / 400 cells; 3.9x the centre |
+| CPU vs CUDA | bit-identical |
+
+Building this exposed a rigid-solver bug, now fixed. Dynamic friction was
+capped by mu times the position solve's normal impulse alone. When the
+restitution solve removes part of that impulse (it does, for contacts pushed
+through joints), sliding friction exceeded mu times the true normal force,
+by 20% in the test rig. It is now capped by the net normal impulse.
+
+Not modelled yet:
+
+- The gel's compliance does not feed back into the rigid contact. The
+  stick-to-slip transition takes a step instead of the ~1 mm of slide in
+  finding 2.
+- Shear hysteresis under reversed loading.
+- Pads larger than about 32 x 32 cells are slow (dense influence sums).
+
 ## Findings so far
 
 **1. Real gels follow elastic half-space laws when pressed, not Winkler ones**
@@ -113,12 +167,53 @@ and noise:
 
 The gel sits between a semi-infinite elastic solid and independent springs,
 somewhat closer to the springs; both pure models are off by several standard
-errors. The likely physics is the gel's finite thickness - a layer a few
-millimetres thick bonded to a rigid backing behaves between the two when the
-contact radius is comparable to the thickness - but this rests on assuming
-the image signal is proportional to surface slope, and the press-phase force
-exponent (finding 1) does not obviously fit the same explanation. A
-finite-layer model checked against both observables is the next step.
+errors.
+
+**5. The gel's finite thickness does not explain finding 4: these contacts
+are too small.** A gel layer of thickness h bonded to a rigid backing does
+lower the radius exponent below 1/3, but only once the contact radius is
+comparable to h. We solved the exact linear-elastic layer problem (bonded
+and frictionless backing, checked against the published series of Garcia &
+Garcia 2018 and Dimitriadis et al. 2002 to 0.1-0.6%):
+
+| a / h | bonded, nu = 0.5: n / beta | frictionless backing: n / beta |
+|---|---|---|
+| 0.3 | 1.71 / 0.327 | 1.63 / 0.331 |
+| 0.5 | 1.85 / 0.315 | 1.71 / 0.325 |
+| 1.0 | 2.16 / 0.275 | 1.88 / 0.299 |
+
+(n: F ~ d^n, beta: a ~ F^beta, local exponents.) The GelSight Mini gel is
+4.25 mm thick (datasheet). The rings in finding 4 end at about 12 px.
+
+The 320 x 240 images cover at most the sensor's 18.6 x 14.3 mm field of view,
+which bounds the scale at >= 16.8 px/mm. Tracking the imprint while the probe
+slides gives 12.3 px/mm (median of 137 slides, IQR 11.1-13.8). That figure
+is probably low, because the gel recovers slowly behind the probe and its
+trail drags the imprint centroid back.
+
+Either way the contact radius stays below 1 mm, so a/h <= 0.23. At that
+ratio a layer is indistinguishable from a half-space (beta >= 0.327,
+n <= 1.71). The layer also moves the two exponents the wrong way relative to
+each other: whenever it lowers beta it raises n above 1.5, while the press
+fits give n = 1.36. No linear-elastic layer gives n < 1.5 for a sphere.
+
+Consequences:
+
+- For probe-sized contacts (a ~ 1 mm on a 4 mm gel) the half-space kernel
+  in `ElasticPatch` is the right one. A layer kernel matters for large
+  contacts (flat or broad objects, a/h ~ 1), so it is worth having as an
+  option, but this data cannot validate it.
+- The low press exponent (n = 1.36 < 1.5) is a property of the depth axis,
+  not of the gel. The candidates are compliance of the robot, mount and
+  force sensor in series (which fits finding 3), a force offset / preload
+  traded off against the fitted onset, and gel viscoelasticity. The presses
+  here are light (about 0.15 -> 0.3 N, starting from a preload).
+- What remains of finding 4 (measured 0.32 vs 0.37 for synthetic Hertz
+  images) comes from outside linear elasticity and the image model. The
+  candidates are adhesion (silicone is tacky, and at sub-newton loads JKR
+  contact grows more slowly than Hertz) and a nonlinear or saturating
+  photometric response, which the synthetic images (signal proportional to
+  slope) do not include.
 
 ## Reproducing
 
@@ -132,12 +227,18 @@ python3 tools/sparsh_contact_area.py --batch 1
 
 ## Open questions
 
-- A finite-thickness layer model (layered half-space kernels), checked
-  against both the press exponent and the contact-radius exponent.
+- Adhesion (JKR) versus photometric nonlinearity as the cause of the
+  remaining contact-radius gap. Fitting F against a^3 (Hertz) versus
+  a^3 - c a^1.5 (JKR) needs radii corrected for blur.
+- A layer kernel for large contacts, validated on data with a/h ~ 1 (flat
+  probes, or a thin gel).
 - Verify the image model (signal proportional to surface slope) with a
   photometric model of the sensor, or with depth reconstructions.
 - Shear at the gel itself: stick / slip regions from marker displacement
   fields on marker-based gels.
+- Two-way coupling: let the pad's gel compliance (normal and tangential)
+  set the rigid contact's compliance, so that indentation and the
+  stick-to-slip transition come out of the dynamics.
 - All fits push the probe radius to the top of its range (30 mm): the probe
   geometry is unknown, and the data may also reflect gel thickness effects
   that a half-space ignores.

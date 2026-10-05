@@ -17,6 +17,9 @@ struct ModelArrays {
     std::vector<float> size, radius, inv_mass, inv_inertia, restitution, friction;
     std::vector<JointModel> joints;
     std::vector<uint8_t> may_collide;  // rigid solver: [nbody * nbody]
+    std::vector<TactileModel> sensors;
+    std::vector<float> tactile_kernel;
+    long long tactile_scratch = 0, tactile_list = 0;  // scratch sizes (elements)
 };
 
 class Backend {
@@ -29,6 +32,7 @@ public:
     virtual void download_contact_counts(std::vector<int>& counts) = 0;
     virtual void upload_controls(const std::vector<float>& ctrl) = 0;
     virtual void download_joint_state(std::vector<float>& q, std::vector<float>& qd) = 0;
+    virtual void download_tactile(std::vector<float>& cells, std::vector<float>& forces) = 0;
     virtual StateView view() = 0;
 };
 

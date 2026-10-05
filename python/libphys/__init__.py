@@ -21,7 +21,7 @@ share CUDA's default stream, so reads and writes are ordered with steps.
 import ctypes
 
 from ._libphys import (Actuator, Broadphase, BodyDesc, Device, ElasticPatch, ElasticPatchDesc, Indenter,
-                       JointDesc, JointType, ModelDesc, Quat, Shape, Solver, Vec3)
+                       JointDesc, JointType, ModelDesc, Quat, Shape, Solver, TactileSensorDesc, Vec3)
 from . import _libphys
 
 # Optional parts, present when built with tinyxml2 / the motion planner.
@@ -49,15 +49,19 @@ def load_urdf(path, **options):
         setattr(opts, name, value)
     return _libphys.load_urdf(path, opts)
 
+
 __all__ = ["Model", "World", "Body", "Joint", "Actuator", "Broadphase", "Device", "Shape", "Solver",
            "JointType", "ElasticPatch", "ElasticPatchDesc", "Indenter", "Vec3", "Quat", "load_urdf",
-           "UrdfModel", "Planner"]
+           "UrdfModel", "Planner", "TactileSensorDesc", "TACTILE_CHANNELS"]
 
 Body = BodyDesc
 Joint = JointDesc
 
 _ACTUATORS = {"none": Actuator.None_, "torque": Actuator.Torque, "position": Actuator.Position,
               "velocity": Actuator.Velocity}
+
+
+TACTILE_CHANNELS = ("pressure", "shear_x", "shear_y", "deflection", "displacement_x", "displacement_y", "stick")
 
 
 class Model:
@@ -74,6 +78,7 @@ class Model:
             setattr(self.desc, name, value)
         self.bodies = []
         self.joints = []
+        self.sensors = []
 
     def add_body(self, body, friction=None, restitution=None):
         """Add a body (lp.Body.sphere / capsule / box / plane / none); returns its index."""
@@ -99,9 +104,36 @@ class Model:
         self.joints.append(joint)
         return len(self.joints) - 1
 
+    def add_tactile_sensor(self, body, origin=(0.0, 0.0, 0.0), frame=(1.0, 0.0, 0.0, 0.0), width=0.02,
+                           height=0.02, resolution=(16, 16), youngs_modulus=3e5, poisson=0.5, dome_radius=0.0,
+                           **settings):
+        """Add a tactile pad of elastic gel to a body; returns its index.
+
+        The pad is a width x height rectangle centred at `origin` in the body
+        frame, in the x-y plane of `frame` (a w, x, y, z quaternion in the body
+        frame), with its outward normal along the frame's +z. Place it on the
+        face of the body's shape that touches objects. resolution = (nx, ny)
+        cells. After every step the World reports, per cell, pressure, shear,
+        the gel's deflection and displacement, and stick / slip
+        (World.tactile)."""
+        t = TactileSensorDesc()
+        t.body = body
+        t.origin = Vec3(origin)
+        t.frame = Quat(frame)
+        t.width, t.height = width, height
+        t.nx, t.ny = resolution
+        t.youngs_modulus, t.poisson, t.dome_radius = youngs_modulus, poisson, dome_radius
+        for name, value in settings.items():
+            if not hasattr(t, name):
+                raise AttributeError(f"unknown tactile sensor setting {name!r}")
+            setattr(t, name, value)
+        self.sensors.append(t)
+        return len(self.sensors) - 1
+
     def build(self):
         self.desc.bodies = self.bodies
         self.desc.joints = self.joints
+        self.desc.tactile_sensors = self.sensors
         return self.desc
 
 
@@ -176,6 +208,12 @@ class World:
     world.ctrl       actuator inputs, [num_envs, num_joints] (writable)
     world.joint_q    joint positions after the last step, [num_envs, num_joints]
     world.joint_qd   joint velocities after the last step
+    world.tactile    per tactile sensor, [num_envs, 7, ny, nx] readings after
+                     the last step; channels (TACTILE_CHANNELS): pressure (Pa),
+                     shear x, y (Pa), normal deflection of the gel (m),
+                     tangential displacement x, y (m), stick (1) / slip (0)
+    world.tactile_force  [num_envs, num_sensors, 3] total (shear x, shear y,
+                     normal) force on each pad, in the pad frame
     """
 
     def __init__(self, model, num_envs=1, device="cuda"):
@@ -190,6 +228,17 @@ class World:
         self.ctrl = views.get("ctrl")
         self.joint_q = views.get("joint_q")
         self.joint_qd = views.get("joint_qd")
+        self.tactile = []
+        self.tactile_force = None
+        if self._world.nsensor > 0:
+            cells = views["tactile"]
+            offset = 0
+            for i in range(self._world.nsensor):
+                t = self._world.sensor(i)
+                size = len(TACTILE_CHANNELS) * t.nx * t.ny
+                self.tactile.append(cells[:, offset:offset + size].view(num_envs, len(TACTILE_CHANNELS), t.ny, t.nx))
+                offset += size
+            self.tactile_force = views["tactile_force"].view(num_envs, self._world.nsensor, 3)
 
     @property
     def num_envs(self):

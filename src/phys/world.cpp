@@ -7,10 +7,13 @@
 #include <string>
 
 #include "phys/backend.h"
+#include "phys/tactile_sensor.h"
 
 namespace phys {
 
 namespace {
+
+static_assert(World::kTactileChannels == detail::kTactileChannels, "tactile channel count");
 
 // Scenes up to this size default to the all-pairs broadphase.
 constexpr int kAllPairsMaxBodies = 32;
@@ -121,6 +124,65 @@ detail::JointModel to_model(const JointDesc& j) {
     m.kd = j.kd;
     m.max_force = j.max_force;
     return m;
+}
+
+// Half-space influence coefficients of a sensor's grid: normal deflection
+// at a cell per unit force on a cell (dx, dy) cells away. The cell's own
+// coefficient is the centre deflection under a uniformly loaded rectangle;
+// the others treat the force as a point load.
+void add_tactile_sensor(const TactileSensorDesc& t, int nenv, detail::ModelArrays& model) {
+    require(t.width > 0.0f && t.height > 0.0f, "tactile sensor sizes must be positive");
+    require(t.nx > 0 && t.ny > 0 && (long long)t.nx * t.ny <= 4096,
+            "tactile sensors need 1 to 4096 cells (64 x 64)");
+    require(t.youngs_modulus > 0.0f && t.poisson >= 0.0f && t.poisson < 0.5001f,
+            "tactile sensors need E > 0 and 0 <= poisson <= 0.5");
+    require(t.max_iterations > 0 && t.tolerance > 0.0f, "tactile solver settings must be positive");
+    require(t.dome_radius >= 0.0f, "tactile dome radius must be non-negative");
+
+    detail::TactileModel m{};
+    m.body = t.body;
+    m.origin[0] = t.origin.x;
+    m.origin[1] = t.origin.y;
+    m.origin[2] = t.origin.z;
+    float qn = std::sqrt(t.frame.w * t.frame.w + t.frame.x * t.frame.x + t.frame.y * t.frame.y +
+                         t.frame.z * t.frame.z);
+    require(qn > 0.0f, "tactile sensor frame quaternion must be non-zero");
+    m.frame[0] = t.frame.w / qn;
+    m.frame[1] = t.frame.x / qn;
+    m.frame[2] = t.frame.y / qn;
+    m.frame[3] = t.frame.z / qn;
+    m.half_w = 0.5f * t.width;
+    m.half_h = 0.5f * t.height;
+    m.nx = t.nx;
+    m.ny = t.ny;
+    m.cell_x = t.width / (float)t.nx;
+    m.cell_y = t.height / (float)t.ny;
+    m.dome_radius = t.dome_radius;
+    float nu = std::fmin(t.poisson, 0.5f);
+    m.tangential_ratio = (2.0f - nu) / (2.0f * (1.0f - nu));
+    m.max_iterations = t.max_iterations;
+    m.tolerance = t.tolerance;
+
+    m.cell_offset = 0;
+    for (const detail::TactileModel& other : model.sensors) m.cell_offset += other.nx * other.ny;
+    m.kernel_offset = (int)model.tactile_kernel.size();
+    m.scratch_offset = model.tactile_scratch;
+    m.list_offset = model.tactile_list;
+    long long cells = (long long)t.nx * t.ny;
+    model.tactile_scratch += 7 * cells * nenv;  // detail::kTactileArrays
+    model.tactile_list += cells * nenv;
+
+    double e_star = t.youngs_modulus / (1.0 - (double)nu * nu);
+    double a = 0.5 * m.cell_x, b = 0.5 * m.cell_y, d = std::sqrt(a * a + b * b);
+    double self = 4.0 * (a * std::log((b + d) / a) + b * std::log((a + d) / b)) /
+                  (kPi * e_star * m.cell_x * m.cell_y);
+    for (int dy = 0; dy < t.ny; dy++) {
+        for (int dx = 0; dx < t.nx; dx++) {
+            double r = std::hypot(dx * (double)m.cell_x, dy * (double)m.cell_y);
+            model.tactile_kernel.push_back((float)(dx == 0 && dy == 0 ? self : 1.0 / (kPi * e_star * r)));
+        }
+    }
+    model.sensors.push_back(m);
 }
 
 }  // namespace
@@ -279,8 +341,23 @@ World::World(const ModelDesc& desc, int nenv, Device device)
                                                       : std::max(16, 8 * nbody_);
         require((long long)max_contacts_ * nenv_ <= INT_MAX, "contact buffer too large");
         p.max_contacts = max_contacts_;
+
+        for (const TactileSensorDesc& t : desc.tactile_sensors) {
+            require(t.body >= 0 && t.body < nbody_, "tactile sensor body out of range");
+            add_tactile_sensor(t, nenv_, model);
+        }
+        sensors_ = desc.tactile_sensors;
+        p.nsensor = (int)sensors_.size();
+        p.ntactile = ntactile_ = 0;
+        for (const detail::TactileModel& t : model.sensors) ntactile_ += t.nx * t.ny;
+        p.ntactile = ntactile_;
+        p.max_sensor_cells = 0;
+        for (const detail::TactileModel& t : model.sensors)
+            p.max_sensor_cells = std::max(p.max_sensor_cells, t.nx * t.ny);
+        p.tactile_threads = detail::tactile_threads_for(p.max_sensor_cells);
     } else {
         require(njoint_ == 0, "the particle solver does not support joints");
+        require(desc.tactile_sensors.empty(), "tactile sensors need the rigid solver");
         p.substeps = 1;
         const float lo[3] = {desc.bounds_lo.x, desc.bounds_lo.y, desc.bounds_lo.z};
         const float hi[3] = {desc.bounds_hi.x, desc.bounds_hi.y, desc.bounds_hi.z};
@@ -365,6 +442,12 @@ void World::get_joint_state(std::vector<float>& q, std::vector<float>& qd) {
 void World::get_contact_counts(std::vector<int>& counts) {
     counts.assign(nenv_, 0);
     if (solver_ == Solver::Rigid) backend_->download_contact_counts(counts);
+}
+
+void World::get_tactile(std::vector<float>& cells, std::vector<float>& forces) {
+    cells.assign((size_t)nenv_ * ntactile_ * kTactileChannels, 0.0f);
+    forces.assign((size_t)nenv_ * sensors_.size() * 3, 0.0f);
+    if (!sensors_.empty()) backend_->download_tactile(cells, forces);
 }
 
 StateView World::state() { return backend_->view(); }
