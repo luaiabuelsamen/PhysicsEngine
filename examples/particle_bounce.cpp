@@ -130,7 +130,7 @@ int main() {
                       "-i pipe:0 -vf \"fps=20,scale=480:360:flags=lanczos,"
                       "split[s0][s1];[s0]palettegen=max_colors=96:stats_mode=diff[p];"
                       "[s1][p]paletteuse=dither=floyd_steinberg\" "
-                      "-loop 0 /tmp/rigid_body_sim.gif 2>/dev/null";
+                      "-loop 0 /tmp/particle_bounce.gif 2>/dev/null";
     FILE* pipe = popen(cmd.c_str(), "w");
     if (!pipe) {
         std::cerr << "Failed to open ffmpeg pipe\n";
@@ -178,6 +178,6 @@ int main() {
     }
 
     pclose(pipe);
-    std::cout << "Done! GIF saved to /tmp/rigid_body_sim.gif" << std::endl;
+    std::cout << "Done! GIF saved to /tmp/particle_bounce.gif" << std::endl;
     return 0;
 }
