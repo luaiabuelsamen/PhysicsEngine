@@ -43,10 +43,10 @@ class RunningNorm:
 class ActorCritic(nn.Module):
     def __init__(self, obs_size, hidden=128):
         super().__init__()
-        def mlp(out):
+        def head(out):
             return nn.Sequential(nn.Linear(obs_size, hidden), nn.Tanh(), nn.Linear(hidden, hidden), nn.Tanh(),
                                  nn.Linear(hidden, out))
-        self.actor, self.critic = mlp(1), mlp(1)
+        self.actor, self.critic = head(1), head(1)
         self.log_std = nn.Parameter(torch.full((1,), -1.2))
 
     def dist(self, obs):
@@ -122,7 +122,7 @@ def save(args, net, norm, log):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--obs", default="tactile", choices=["proprio", "force", "tactile"])
+    ap.add_argument("--obs", default="tactile", choices=["proprio", "force", "tactile", "markers"])
     ap.add_argument("--envs", type=int, default=2048)
     ap.add_argument("--updates", type=int, default=120)
     ap.add_argument("--lr", type=float, default=3e-4)

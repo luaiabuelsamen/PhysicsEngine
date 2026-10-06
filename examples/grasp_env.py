@@ -13,6 +13,9 @@ e^{+-0.3}, starting from 0.4 N - as a grip reflex does. Observation sets:
   "proprio"  time, finger positions and velocities, the last grip command
   "force"    + each pad's normal and shear force
   "tactile"  + each pad's stick fraction (sticking / touching cells)
+  "markers"  "force" + each pad's gel deflection and tangential displacement
+             images (12 x 12), what a vision-based sensor with markers sees;
+             no stick map
 
 Pad forces tell a policy the ball's weight but not its friction; the stick
 fraction - which shrinks as the grip nears slip, Mindlin's
@@ -41,7 +44,9 @@ PHYSICS_STEPS = 2            # per control step
 EPISODE = 60                 # control steps (2 s)
 GRASP_TIME = 0.5             # s before lifting
 LIFT_SPEED, LIFT_HEIGHT = 0.1, 0.1
-OBS_SIZES = {"proprio": 6, "force": 10, "tactile": 12}
+PAD_CELLS = 12
+IMAGE_CHANNELS = 3           # deflection, displacement x, displacement y
+OBS_SIZES = {"proprio": 6, "force": 10, "tactile": 12, "markers": 10 + 2 * IMAGE_CHANNELS * PAD_CELLS ** 2}
 
 
 GRIP_RATE = 0.3            # log grip change per control step at |action| = 1
@@ -148,7 +153,7 @@ class GraspEnv:
         fq = torch.stack([w.joint_q[:, 1], w.joint_q[:, 2], w.joint_qd[:, 1], w.joint_qd[:, 2]], dim=1)
         parts = [time[:, None], fq * torch.tensor([50.0, 50.0, 2.0, 2.0], device=self.device),
                  (torch.log(self.grip / START_GRIP) / 3.0)[:, None]]
-        if self.obs_kind in ("force", "tactile"):
+        if self.obs_kind in ("force", "tactile", "markers"):
             f = w.tactile_force                      # [n, 2, 3]: shear x, shear y, normal
             shear = torch.linalg.norm(f[:, :, :2], dim=2)
             parts += [f[:, :, 2] / 5.0, shear / 5.0]
@@ -159,6 +164,9 @@ class GraspEnv:
                 stick = (t[:, 6] > 0.5).sum(dim=(1, 2)).float()
                 fracs.append(torch.where(contact > 0, stick / contact.clamp(min=1), torch.ones_like(contact)))
             parts.append(torch.stack(fracs, dim=1))
+        if self.obs_kind == "markers":
+            for t in w.tactile:  # [n, 7, 12, 12]: channels 3-5, in mm
+                parts.append((t[:, 3:6] * 1e3).reshape(self.n, -1))
         obs = torch.cat(parts, dim=1)
         if obs.shape[1] < OBS_SIZES[self.obs_kind]:  # pad to the documented size
             obs = torch.cat([obs, torch.zeros(self.n, OBS_SIZES[self.obs_kind] - obs.shape[1], device=self.device)], 1)
