@@ -181,6 +181,11 @@ The analysis is in [docs/TACTILE.md](docs/TACTILE.md).
 
 ![Learned tactile grasping](docs/media/grasp_tactile.gif)
 
+*A policy that sees the gel images (no stick map), on four hidden balls.
+Below each: the simulated sensor image, pressure with shear, and the grip
+force against the least force that holds the ball (dashed) and the break
+limit (red). The lightest, grippiest ball breaks.*
+
 `examples/grasp_env.py` is a batched RL task where touch matters:
 - **Setup.** A parallel-jaw gripper with a coupled gel pad on each finger
   must lift a ball whose mass (0.05-0.4 kg) and friction (0.3-0.8) are
@@ -190,30 +195,39 @@ The analysis is in [docs/TACTILE.md](docs/TACTILE.md).
   too little and it slips out; too much and it breaks.
 - **Control.** The lift is scripted; the policy adjusts the grip force.
 
-PPO (`examples/train_grasp.py`) is trained with three observation sets,
-18M env steps each, about 30 minutes on the Orin with all three training at
-once. The results below are
-from 4,096 held-out episodes (`examples/eval_grasp.py`):
+PPO (`examples/train_grasp.py`) is trained with four observation sets,
+3 seeds each, 18M env steps per run (about 11 minutes per run on the Orin
+when trained alone). The
+results below are from 4,096 held-out episodes per policy
+(`examples/eval_grasp.py`):
 
-| Policy observes | Success | Broken | Dropped |
+| Policy observes | Success: mean over seeds (range) | Broken | Dropped |
 |---|---|---|---|
 | (fixed grip, best: 2 N) | 28% | 32% | 41% |
-| finger positions and velocities, grip, time | 37% | 36% | 27% |
-| + each pad's normal and shear force | 36% | 17% | 47% |
-| **+ each pad's stick fraction** | **75%** | 25% | **0%** |
+| finger positions and velocities, grip, time | 23% (0-37%) | 24% | 54% |
+| + each pad's normal and shear force | 36% (36-36%) | 28% | 36% |
+| **+ each pad's gel deflection and displacement images** (12 x 12, no stick map) | **67% (65-68%)** | 33% | **0%** |
+| + each pad's stick fraction (a scalar instead of the images) | 59% (25-75%) | 19% | 22% |
 | (oracle that knows mass and friction) | 100% | 0% | 0% |
 
 ![Learning curves](docs/media/grasp_learning.png)
 
-**Why the stick fraction matters.**
-- Pad forces give the policy the ball's weight, not its friction, and that
-  is not enough.
-- The stick fraction is the share of the contact that still sticks. Under
-  Mindlin's theory it shrinks as the grip nears slip, so it measures how
-  close to slipping the grasp is without knowing the friction.
-- The policy that sees it learns a grip reflex: it tightens just enough as
-  the load comes on. It never drops a ball and only breaks the lightest,
-  grippiest ones, for which even its 0.4 N starting grip is too much.
+**Why touch helps.**
+- **Forces are not enough.** Pad forces give the ball's weight but not its
+  friction, and stop at 36%.
+- **The images are enough.** The images are what a vision-based sensor with
+  markers provides: the gel's deflection and its sideways displacement.
+  - As the grip nears slip, the outer ring of the contact starts slipping
+    while the centre still sticks (Mindlin partial slip). That changes the
+    shape of the displacement field, which is presumably what the policy
+    reads (which features it uses has not been analysed).
+  - From those images alone, the policy learns a grip reflex: it tightens
+    just enough as the load comes on. It never drops a ball, on every seed.
+- **The stick fraction is a less reliable shortcut.** Handed the share of
+  the contact that still sticks as a single number, PPO reaches 75% on two
+  seeds but stalls at 25% on the third.
+- **Remaining failures** are breaks of the lightest, grippiest balls, for
+  which even the 0.4 N starting grip is over the limit.
 
 A contact model with a single friction state per contact, such as rigid
 Coulomb friction, cannot produce this signal; it needs a model of partial

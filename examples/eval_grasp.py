@@ -3,6 +3,9 @@ held-out episodes, learning curves against fixed-grip and oracle baselines,
 and a GIF of a policy at work.
 
     PYTHONPATH=python:$PYTHONPATH python3 examples/eval_grasp.py --runs runs --media docs/media
+
+Every sub-directory of --runs with a policy.pt is evaluated; its name is the
+observation set, optionally with a seed suffix (tactile, tactile_s1, ...).
 """
 
 import argparse
@@ -17,8 +20,21 @@ from grasp_env import BALL_FRICTION, EPISODE, FINGER_FRICTION, MASSES, GraspEnv,
 from train_grasp import ActorCritic, RunningNorm
 from libphys import viz
 
-KINDS = ("proprio", "force", "tactile")
-LABELS = {"proprio": "proprioception", "force": "+ pad forces", "tactile": "+ pad forces + stick fraction"}
+KINDS = ("proprio", "force", "markers", "tactile")
+LABELS = {"proprio": "proprioception", "force": "+ pad forces", "markers": "+ pad forces + gel images (no stick map)",
+          "tactile": "+ pad forces + stick fraction"}
+COLORS = {"proprio": "tab:blue", "force": "tab:orange", "markers": "tab:purple", "tactile": "tab:green"}
+
+
+def find_runs(roots):
+    """{kind: [run dirs]} for every run directory under the roots."""
+    runs = {}
+    for root in roots:
+        for name in sorted(os.listdir(root)):
+            path = os.path.join(root, name)
+            if os.path.exists(os.path.join(path, "policy.pt")):
+                runs.setdefault(name.split("_s")[0], []).append(path)
+    return runs
 
 
 def load(run_dir, env):
@@ -56,7 +72,7 @@ def evaluate(policy_fn, kind, n, seed):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", default="runs")
+    ap.add_argument("--runs", nargs="+", default=["runs"])
     ap.add_argument("--media", default=".")
     ap.add_argument("--envs", type=int, default=4096)
     args = ap.parse_args()
@@ -64,11 +80,11 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    runs = find_runs(args.runs)
     results = {}
     for kind in KINDS:
-        run = os.path.join(args.runs, kind)
-        if os.path.exists(os.path.join(run, "policy.pt")):
-            results[kind] = evaluate(lambda env, run=run: load(run, env), kind, args.envs, seed=123)
+        for run in runs.get(kind, []):
+            results.setdefault(kind, []).append(evaluate(lambda env, run=run: load(run, env), kind, args.envs, seed=123))
     baselines = {}
     for f in (1.0, 2.0, 4.0):
         baselines[f"fixed {f:g} N"] = evaluate(
@@ -77,45 +93,51 @@ def main():
     baselines["oracle (knows m, mu)"] = evaluate(
         lambda env: (lambda obs: action_towards(env.grip, 1.25 * env.min_grip())), "proprio", args.envs, seed=123)
 
-    print(f"{'policy':34s} success  broken  dropped")
-    for name, r in list((LABELS[k], v) for k, v in results.items()) + list(baselines.items()):
-        print(f"{name:34s} {r['success']:7.3f} {r['broken']:7.3f} {r['dropped']:8.3f}")
-    print("\nsuccess by ball (mass kg, contact mu):")
-    mus = [0.5 * (FINGER_FRICTION + fb) for fb in BALL_FRICTION]
-    header = "".join(f"  {m:.2f}/{mu:.1f}" for m in MASSES for mu in mus)
-    print(f"{'':34s}{header}")
-    for kind, r in results.items():
-        print(f"{LABELS[kind]:34s}" + "".join(f"  {r['by_variant'].get(v, float('nan')):8.2f}"
-                                              for v in range(len(MASSES) * len(mus))))
-    with open(os.path.join(args.runs, "eval.json"), "w") as f:
+    def summary(rs, key):
+        v = [r[key] for r in rs]
+        return sum(v) / len(v), min(v), max(v)
+
+    print(f"{'policy':44s} seeds  success (min-max)    broken  dropped")
+    for kind, rs in results.items():
+        m, lo, hi = summary(rs, "success")
+        print(f"{LABELS[kind]:44s} {len(rs):5d}  {m:.3f} ({lo:.2f}-{hi:.2f})   {summary(rs, 'broken')[0]:.3f}   "
+              f"{summary(rs, 'dropped')[0]:.3f}")
+    for name, r in baselines.items():
+        print(f"{name:44s}     -  {r['success']:.3f}                {r['broken']:.3f}   {r['dropped']:.3f}")
+    with open(os.path.join(args.runs[0], "eval.json"), "w") as f:
         json.dump({"policies": results, "baselines": baselines}, f, indent=1)
 
-    # Learning curves.
-    fig, ax = plt.subplots(figsize=(6.4, 4.0))
+    # Learning curves: mean over seeds, shaded min-max.
+    fig, ax = plt.subplots(figsize=(6.8, 4.2))
     for kind in KINDS:
-        path = os.path.join(args.runs, kind, "log.json")
-        if not os.path.exists(path):
+        logs = [json.load(open(os.path.join(r, "log.json"))) for r in runs.get(kind, [])]
+        if not logs:
             continue
-        log = json.load(open(path))
-        steps = [e["steps"] / 1e6 for e in log]
-        ax.plot(steps, [e["success"] for e in log], label=LABELS[kind])
+        n = min(len(l) for l in logs)
+        steps = [logs[0][i]["steps"] / 1e6 for i in range(n)]
+        curves = torch.tensor([[l[i]["success"] for i in range(n)] for l in logs])
+        ax.plot(steps, curves.mean(0), color=COLORS[kind], label=f"{LABELS[kind]} ({len(logs)} seeds)")
+        if len(logs) > 1:
+            ax.fill_between(steps, curves.min(0).values, curves.max(0).values, color=COLORS[kind], alpha=0.15)
     ax.axhline(baselines["oracle (knows m, mu)"]["success"], color="k", ls="--", lw=1, label="oracle (knows mass, friction)")
     best_fixed = max((v["success"], k) for k, v in baselines.items() if k.startswith("fixed"))
     ax.axhline(best_fixed[0], color="gray", ls=":", lw=1, label=f"best fixed grip ({best_fixed[1][6:]})")
-    ax.set(xlabel="env steps (millions)", ylabel="success rate (lifted, not broken)",
+    ax.set(xlabel="env steps (millions)", ylabel="success rate during training",
            title="Fragile grasp: which observations let PPO learn it", ylim=(0, 1.02))
-    ax.legend(frameon=False, fontsize=8, loc="center right")
+    ax.legend(frameon=False, fontsize=7, loc="upper left")
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     fig.savefig(os.path.join(args.media, "grasp_learning.png"), dpi=120)
 
-    # GIF of the tactile policy on four different hidden balls.
-    if "tactile" in results:
-        make_gif(os.path.join(args.runs, "tactile"), os.path.join(args.media, "grasp_tactile.gif"))
+    # GIF of the best policy that sees the gel images, on four hidden balls.
+    kind = "markers" if "markers" in results else "tactile"
+    if kind in results:
+        best = max(range(len(results[kind])), key=lambda i: results[kind][i]["success"])
+        make_gif(runs[kind][best], kind, os.path.join(args.media, "grasp_tactile.gif"))
 
 
-def make_gif(run, path):
-    env = GraspEnv(num_envs=4, obs="tactile", seed=7)
+def make_gif(run, kind, path):
+    env = GraspEnv(num_envs=4, obs=kind, seed=7)
     policy = load(run, env)
     picks = [(0.05, 0.8), (0.4, 0.8), (0.1, 0.3), (0.4, 0.3)]  # (mass, mu)
     mus = [0.5 * (FINGER_FRICTION + fb) for fb in BALL_FRICTION]
@@ -148,8 +170,8 @@ def make_gif(run, path):
             grips[e].append((env.grip[e].item(), env.min_grip()[e].item()))
         frame = Image.new("RGB", (4 * tile_w, tile_h + 22), (250, 249, 246))
         d = ImageDraw.Draw(frame)
-        d.text((6, 4), f"Policy with tactile stick fraction, t = {k / 30:.2f} s: grip force vs the least that holds "
-                       f"(dashed) and the break limit (red)", fill=(20, 20, 20))
+        d.text((6, 4), f"Policy seeing {LABELS[kind][2:]}, t = {k / 30:.2f} s: grip force vs the least that "
+                       f"holds (dashed) and the break limit (red)", fill=(20, 20, 20))
         for e in range(4):
             x0 = e * tile_w
             img = viz.render(env.world, e, cam, colors=colors, hidden=(env.carriage,), plane_extent=0.12)
@@ -165,7 +187,7 @@ def make_gif(run, path):
             # grip trace
             gx0, gy0, gw, gh = x0 + 6, 22 + 190 + 100, tile_w - 12, 26
             fmax = 1.0 + max(1.6 * g[1] for g in grips[e])
-            pts = [(gx0 + gw * i / EPISODE, gy0 + gh - gh * g[0] / fmax) for i, g in enumerate(grips[e])]
+            pts = [(gx0 + gw * i / EPISODE, gy0 + gh - gh * min(g[0] / fmax, 1.0)) for i, g in enumerate(grips[e])]
             ymin = gy0 + gh - gh * grips[e][0][1] / fmax
             ybrk = gy0 + gh - gh * 1.6 * grips[e][0][1] / fmax
             for xx in range(gx0, gx0 + gw, 6):
