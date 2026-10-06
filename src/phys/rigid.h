@@ -1219,7 +1219,6 @@ PHYS_HD void rigid_solve_positions(const Params& p, const Buffers& b, int env) {
 PHYS_HD void rigid_solve_velocities(const Params& p, const Buffers& b, int env) {
     Contact* contacts = b.contacts + (size_t)env * p.max_contacts;
     int n = b.ncontact[env] < p.max_contacts ? b.ncontact[env] : p.max_contacts;
-    if (p.nsensor > 0) solve_pad_shear(p, b, env);
     for (int j = 0; j < p.njoint; j++) solve_joint_velocity(p, b, env, j);
     for (int it = 0; it < p.velocity_iterations; it++)
         for (int k = 0; k < n; k++)
@@ -1230,6 +1229,10 @@ PHYS_HD void rigid_solve_velocities(const Params& p, const Buffers& b, int env) 
         for (int k = 0; k < n; k++)
             solve_contact_restitution(p, b, contacts[(it & 1) ? k : n - 1 - k]);
     }
+    // Last, so that restitution (which zeroes the normal velocity of every
+    // active contact, e.g. an object resting on a table) cannot cancel the
+    // gel's pull on an object being lifted.
+    if (p.nsensor > 0) solve_pad_shear(p, b, env);
 }
 
 }  // namespace detail
