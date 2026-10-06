@@ -36,6 +36,7 @@ public:
             tactile_list_.assign(model_.tactile_list, 0);
             tactile_accum_.assign((size_t)p_.nenv * p_.nsensor * kTactileAccum, 0.0f);
             tactile_touch_.assign((size_t)p_.nenv * p_.nsensor * kTactileMaxTouching, -1);
+            tactile_coupling_.assign((size_t)p_.nenv * p_.nsensor * kPadState, 0.0f);
             exec_list_.assign(p_.max_sensor_cells, 0);
             exec_vals_.assign(p_.max_sensor_cells, 0.0f);
             exec_red_.assign(kTactileMaxThreads, 0.0f);
@@ -78,18 +79,19 @@ public:
     void step(float dt, int nsteps) override {
         set_step_length(p_, dt);
         Buffers b = buffers();
+        SerialExec ex{p_.tactile_threads, exec_list_.data(), exec_vals_.data(), exec_red_.data(), nullptr};
         for (int step = 0; step < nsteps; step++) {
-            if (p_.rigid)
+            if (p_.rigid) {
                 rigid_step(b);
-            else
+                // Every step: coupled pads take their stiffness from it.
+                for (int s = 0; s < p_.nsensor; s++)
+                    for (int e = 0; e < p_.nenv; e++) tactile_update(ex, p_, b, e, s);
+            } else {
                 particle_step(b);
+            }
         }
-        if (p_.rigid) {
+        if (p_.rigid)
             for (int i = 0; i < p_.nenv * p_.njoint; i++) rigid_observe_joint(p_, b, i);
-            SerialExec ex{p_.tactile_threads, exec_list_.data(), exec_vals_.data(), exec_red_.data(), nullptr};
-            for (int s = 0; s < p_.nsensor; s++)
-                for (int e = 0; e < p_.nenv; e++) tactile_update(ex, p_, b, e, s);
-        }
     }
 
     void synchronize() override {}
@@ -197,6 +199,7 @@ private:
         b.tactile_list = tactile_list_.data();
         b.tactile_accum = tactile_accum_.data();
         b.tactile_touch = tactile_touch_.data();
+        b.tactile_coupling = tactile_coupling_.data();
         return b;
     }
 
@@ -215,7 +218,7 @@ private:
     std::vector<float> ctrl_, joint_q_, joint_qd_, joint_lambda_;
     std::vector<float> tactile_, tactile_force_, tactile_scratch_;
     std::vector<int> tactile_list_, tactile_touch_, exec_list_;
-    std::vector<float> tactile_accum_, exec_vals_, exec_red_;
+    std::vector<float> tactile_accum_, tactile_coupling_, exec_vals_, exec_red_;
 };
 
 }  // namespace

@@ -55,10 +55,10 @@ struct Rig {
         model.bodies = {carriage, box, ball};  // 0, 1, 2
         JointDesc lift = JointDesc::slider(-1, 0, {0, 0, R + 0.005f}, {0, 0, 0}, {0, 0, 1});
         lift.actuator = Actuator::Torque;
-        lift.damping = 20.0f;
+        lift.damping = 2.0f;
         JointDesc slide = JointDesc::slider(0, 1, {0, 0, 0}, {0, 0, 0}, {1, 0, 0});
         slide.actuator = Actuator::Torque;
-        slide.damping = 20.0f;
+        slide.damping = 2.0f;
         model.joints = {lift, slide};
 
         TactileSensorDesc t;
@@ -82,11 +82,12 @@ struct Rig {
             s.pz[e * 3 + 1] = R + 0.005f;
         }
         w.set_state(s);
+        // Press first; shear once the gel has taken the load.
         std::vector<float> ctrl(nenv * 2);
-        for (int e = 0; e < nenv; e++) {
-            ctrl[e * 2 + 0] = -W[e];
-            ctrl[e * 2 + 1] = Q[e];
-        }
+        for (int e = 0; e < nenv; e++) ctrl[e * 2 + 0] = -W[e];
+        w.set_controls(ctrl);
+        w.step(1.0f / 240.0f, 60);
+        for (int e = 0; e < nenv; e++) ctrl[e * 2 + 1] = Q[e];
         w.set_controls(ctrl);
         w.step(1.0f / 240.0f, (int)(seconds * 240.0f));
         return w;
@@ -190,7 +191,7 @@ void test_partial_slip() {
 // pressure, |q| = (|Q| / W) p, and |Q| close to mu W.
 void test_full_slip() {
     Rig rig;
-    World w = rig.run(Device::CUDA, {1.0f}, {0.8f}, 0.3f);
+    World w = rig.run(Device::CUDA, {1.0f}, {0.8f}, 0.08f);  // mid-slide, still on the sphere
     Reading r = read(w, rig);
     int stick = 0, contact = 0;
     float Wr = r.force[2], Qr = std::hypot(r.force[0], r.force[1]), worst = 0.0f;
@@ -269,6 +270,124 @@ void test_flat_on_plane() {
     CHECK(edge > 1.5f * centre);
 }
 
+
+// Two-way coupling: the pad body itself indents the sphere by Hertz's
+// approach, and under shear it is displaced along Mindlin's curve
+// u = u* (1 - (1 - Q / mu W)^(2/3)), u* = 3 mu W / (2 k_t), with
+// k_t = 2 E* a / tangential_ratio the initial tangential stiffness.
+void test_coupled_indentation_and_mindlin() {
+    Rig rig;
+    std::vector<float> W = {1.0f, 1.0f, 1.0f, 2.0f};
+    std::vector<float> Q = {0.0f, 0.15f, 0.3f, 0.0f};
+    World w = rig.run(Device::CUDA, W, Q, 1.0f);
+    HostState s;
+    w.get_state(s);
+    float e_star = rig.E / (1.0f - rig.nu * rig.nu);
+    float ratio = (2.0f - rig.nu) / (2.0f * (1.0f - rig.nu));
+    for (int e = 0; e < (int)W.size(); e++) {
+        float pad_z = s.pz[e * 3 + 1] - 0.005f;
+        float indent = rig.R - pad_z;  // sphere top minus pad surface
+        float a = std::cbrt(3.0f * W[e] * rig.R / (4.0f * e_star));
+        float delta = a * a / rig.R;
+        float kt = 2.0f * e_star * a / ratio;
+        float ustar = 1.5f * rig.mu * W[e] / kt;
+        float u = ustar * (1.0f - std::pow(1.0f - Q[e] / (rig.mu * W[e]), 2.0f / 3.0f));
+        float ux = s.px[e * 3 + 1];
+        std::printf("  W %.1f N, Q %.2f N: pad indents %.3f mm (Hertz %.3f); shear displacement %.3f mm "
+                    "(Mindlin %.3f)\n", W[e], Q[e], indent * 1e3f, delta * 1e3f, ux * 1e3f, u * 1e3f);
+        CHECK(std::fabs(indent - delta) < 0.03f * delta);
+        CHECK(std::fabs(ux - u) < 0.08f * u + 5e-6f);
+    }
+}
+
+// The coupled pad's force is steady from step to step, even at 10 substeps
+// (a rigid contact pushed through joints scatters by ~8% there).
+void test_coupled_steady() {
+    Rig rig;
+    rig.model.substeps = 10;
+    World w = rig.run(Device::CUDA, {1.0f}, {0.3f}, 1.0f);
+    std::vector<float> cells, force;
+    double sw = 0, sw2 = 0, sq = 0, sq2 = 0;
+    const int n = 120;
+    for (int k = 0; k < n; k++) {
+        w.step(1.0f / 240.0f);
+        w.get_tactile(cells, force);
+        sw += force[2];
+        sw2 += force[2] * force[2];
+        sq += force[0];
+        sq2 += force[0] * force[0];
+    }
+    double mw = sw / n, mq = sq / n;
+    double dw = std::sqrt(std::fmax(sw2 / n - mw * mw, 0.0)), dq = std::sqrt(std::fmax(sq2 / n - mq * mq, 0.0));
+    std::printf("  10 substeps, over 0.5 s: W %.5f +- %.1e N, Q %.5f +- %.1e N\n", mw, dw, mq, dq);
+    CHECK(std::fabs(mw - 1.0) < 0.005);
+    CHECK(std::fabs(mq + 0.3) < 0.005);
+    CHECK(dw < 1e-3 && dq < 1e-3);
+}
+
+// A sharp corner under a coupled pad: the linear gel would let it sink
+// without limit (a point load); the gel's thickness caps the indentation at
+// half of it, and the pad keeps reporting the load.
+void test_coupled_corner() {
+    ModelDesc m;
+    m.gravity = {0.0f, 0.0f, 0.0f};
+    m.substeps = 40;
+    BodyDesc carriage = BodyDesc::none(0.5f, {1e-3f, 1e-3f, 1e-3f});
+    BodyDesc finger = BodyDesc::box({0.008f, 0.008f, 0.004f}, 0.05f);
+    BodyDesc cube = BodyDesc::box({0.005f, 0.005f, 0.005f}, 0.0f);
+    finger.restitution = cube.restitution = 0.0f;
+    m.bodies = {carriage, finger, cube};
+    JointDesc lift = JointDesc::slider(-1, 0, {0, 0, 0.004f}, {0, 0, 0}, {0, 0, 1});
+    lift.actuator = Actuator::Torque;
+    lift.damping = 2.0f;
+    m.joints = {lift, JointDesc::fixed(0, 1, {0, 0, 0}, {0, 0, 0})};
+    TactileSensorDesc t;
+    t.body = 1;
+    t.origin = {0.0f, 0.0f, -0.004f};
+    t.frame = {0.0f, 1.0f, 0.0f, 0.0f};
+    t.width = t.height = 0.016f;
+    t.nx = t.ny = 32;
+    m.tactile_sensors = {t};
+    World w(m, 1, Device::CUDA);
+    HostState s(3);
+    s.pz[0] = s.pz[1] = 0.004f;
+    // Corner up: turn (1, 1, 1) onto +z.
+    float angle = std::acos(1.0f / std::sqrt(3.0f)), sn = std::sin(angle / 2.0f);
+    s.pz[2] = -0.005f * std::sqrt(3.0f);
+    s.qw[2] = std::cos(angle / 2.0f);
+    s.qx[2] = sn / std::sqrt(2.0f);
+    s.qy[2] = -sn / std::sqrt(2.0f);
+    w.set_state(s);
+    w.set_controls({-3.0f, 0.0f});
+    w.step(1.0f / 240.0f, 240);
+    std::vector<float> cells, force;
+    w.get_tactile(cells, force);
+    HostState out;
+    w.get_state(out);
+    float indent = -(out.pz[1] - 0.004f);
+    std::printf("  corner at 3 N: pad reports %.4f N, indentation %.2f mm (limit %.2f mm)\n", force[2],
+                indent * 1e3f, 0.5f * t.thickness * 1e3f);
+    CHECK(std::fabs(force[2] - 3.0f) < 0.03f);
+    CHECK(indent > 0.0f && indent < 0.5f * t.thickness * 1.05f);
+}
+
+// With coupling off the pad only observes the rigid contact (which, pushed
+// through joints, chatters by a few percent step to step).
+void test_uncoupled() {
+    Rig rig;
+    rig.model.tactile_sensors[0].coupled = false;
+    World w = rig.run(Device::CUDA, {1.0f}, {0.15f}, 1.0f);
+    Reading r = read(w, rig);
+    HostState s;
+    w.get_state(s);
+    float indent = rig.R - (s.pz[1] - 0.005f);
+    std::printf("  uncoupled: W %.4f N, Q %.4f N, pad indents %.4f mm (rigid contact)\n", r.force[2], r.force[0],
+                indent * 1e3f);
+    CHECK(std::fabs(r.force[2] - 1.0f) < 0.05f);
+    CHECK(std::fabs(r.force[0] + 0.15f) < 0.02f);
+    CHECK(indent < 1e-5f);
+}
+
 }  // namespace
 
 int main() {
@@ -279,6 +398,10 @@ int main() {
         {"full_slip", test_full_slip},
         {"backends_agree", test_backends_agree},
         {"flat_on_plane", test_flat_on_plane},
+        {"coupled_indentation_and_mindlin", test_coupled_indentation_and_mindlin},
+        {"coupled_steady", test_coupled_steady},
+        {"coupled_corner", test_coupled_corner},
+        {"uncoupled", test_uncoupled},
     };
     for (const Test& t : tests) {
         int before = g_failures;

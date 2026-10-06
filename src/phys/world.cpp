@@ -162,6 +162,12 @@ void add_tactile_sensor(const TactileSensorDesc& t, int nenv, detail::ModelArray
     m.tangential_ratio = (2.0f - nu) / (2.0f * (1.0f - nu));
     m.max_iterations = t.max_iterations;
     m.tolerance = t.tolerance;
+    m.coupled = t.coupled ? 1 : 0;
+    m.e_star = t.youngs_modulus / (1.0f - nu * nu);
+    // Before the first tactile solve: a circular contact a quarter of the pad wide.
+    m.default_stiffness = 2.0f * m.e_star * 0.125f * std::fmin(t.width, t.height);
+    require(t.thickness > 0.0f, "tactile sensor thickness must be positive");
+    m.max_indentation = 0.5f * t.thickness;
 
     m.cell_offset = 0;
     for (const detail::TactileModel& other : model.sensors) m.cell_offset += other.nx * other.ny;

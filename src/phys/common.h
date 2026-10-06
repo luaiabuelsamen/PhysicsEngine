@@ -72,6 +72,11 @@ struct Params {
 constexpr int kTactileChannels = 7;
 constexpr int kTactileAccum = 5;
 constexpr int kTactileMaxTouching = 4;  // bodies considered per pad
+// Coupling state per (env, sensor): normal secant stiffness, tangential
+// stiffness (N/m; 0 = not known yet), the gel's shear deflection (pad
+// frame, m) and the pad's shear force this substep (world, N).
+enum { kPadNormalStiffness = 0, kPadShearStiffness = 1, kPadShearX = 2, kPadShearY = 3, kPadForce = 4,
+       kPadState = 7 };
 
 // A tactile sensor pad as the solver sees it (see phys::TactileSensorDesc).
 // Cells are numbered row-major, cell (ix, iy) = iy * nx + ix, at local
@@ -91,6 +96,10 @@ struct TactileModel {
     long long list_offset;      // into the int scratch: nx * ny per env
     int max_iterations;
     float tolerance;
+    int coupled;                // the gel's compliance acts in the rigid solve
+    float e_star;               // plane-strain modulus E / (1 - nu^2)
+    float default_stiffness;    // normal stiffness (N/m) before the first tactile solve
+    float max_indentation;      // coupled indentation limit (m)
 };
 
 // Fill in the fields that depend on the step length. Runs on the host, so
@@ -114,6 +123,8 @@ struct Contact {
     float static_friction[3];    // accumulated static friction correction on a
     float friction_impulse[3];   // accumulated dynamic friction impulse on a
     float normal_impulse;        // accumulated restitution (normal velocity) impulse on a
+    int pad;                     // tactile sensor whose pad this contact presses on, or -1
+    float compliance;            // > 0: compliant normal constraint (m/N), on coupled pads
     float vn_pre;              // normal relative velocity when detected
     float mu, e;               // combined friction and restitution
 };
@@ -174,6 +185,7 @@ struct Buffers {
     // sum lambda) and the bodies touching it, [nenv * nsensor * 4] (-1: none).
     float* tactile_accum;
     int* tactile_touch;
+    float* tactile_coupling;    // [nenv * nsensor * kPadState]
 };
 
 }  // namespace detail

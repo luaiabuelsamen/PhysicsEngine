@@ -60,7 +60,7 @@ constexpr float kTactileMiss = 1e30f;  // gap of cells that see no indenter
 PHYS_HD float ray_enter(const Params& p, const Buffers& b, int g, V3 o, V3 d) {
     int body = g % p.nbody;
     Q4 q = load4(b.quat, g);
-    V3 lo = inv_rotate(q, o - load3(b.pos, g));
+    V3 lo = inv_rotate(q, o - body_pos(b, g));
     V3 ld = inv_rotate(q, d);
     V3 size = model3(b.size, body);
     const float miss = kTactileMiss;
@@ -171,6 +171,12 @@ struct SerialExec {
         for (int w = 1; w < threads / kWarp; w++) total += red[w * kWarp];
         return total;
     }
+    template <class F>
+    float maximum(int n, F f) {
+        float m = 0.0f;
+        for (int i = 0; i < n; i++) m = fmaxf(m, f(i));
+        return m;
+    }
     // Writes value(k) for every k < n with keep(k), in increasing k; returns the count.
     template <class Keep, class Value>
     int compact(int n, Keep keep, Value value, int* out) {
@@ -214,6 +220,19 @@ struct BlockExec {
         for (int w = 1; w < (int)(blockDim.x / kWarp); w++) total += red[w];
         __syncthreads();
         return total;
+    }
+    // Maximum of f over [0, n), at least 0 (exact, so order does not matter).
+    template <class F>
+    __device__ float maximum(int n, F f) {
+        float v = 0.0f;
+        for (int i = threadIdx.x; i < n; i += blockDim.x) v = fmaxf(v, f(i));
+        for (int off = kWarp / 2; off > 0; off >>= 1) v = fmaxf(v, __shfl_down_sync(0xffffffffu, v, off));
+        if ((threadIdx.x & (kWarp - 1)) == 0) red[threadIdx.x / kWarp] = v;
+        __syncthreads();
+        float m = red[0];
+        for (int w = 1; w < (int)(blockDim.x / kWarp); w++) m = fmaxf(m, red[w]);
+        __syncthreads();
+        return m;
     }
     template <class Keep, class Value>
     __device__ int compact(int n, Keep keep, Value value, int* out) {
@@ -406,22 +425,6 @@ PHYS_HD int solve_normal_load(Exec& ex, const TactileProblem& pr, int m, float W
     return it;
 }
 
-// Pad frame in world coordinates.
-struct PadFrame {
-    V3 origin, tx, ty, nz;
-};
-
-PHYS_HD PadFrame pad_frame(const Buffers& b, const TactileModel& s, int g) {
-    Q4 qb = load4(b.quat, g);
-    Q4 q = qmul(qb, Q4{s.frame[0], s.frame[1], s.frame[2], s.frame[3]});
-    PadFrame f;
-    f.origin = load3(b.pos, g) + rotate(qb, V3{s.origin[0], s.origin[1], s.origin[2]});
-    f.tx = rotate(q, V3{1.0f, 0.0f, 0.0f});
-    f.ty = rotate(q, V3{0.0f, 1.0f, 0.0f});
-    f.nz = rotate(q, V3{0.0f, 0.0f, 1.0f});
-    return f;
-}
-
 PHYS_HD float cell_local_x(const TactileModel& s, int c) {
     return -s.half_w + ((float)(c % s.nx) + 0.5f) * s.cell_x;
 }
@@ -442,22 +445,14 @@ PHYS_HD void tactile_accumulate(const Params& p, const Buffers& b, int env, int 
     }
     const int g = env * p.nbody + s.body;
     if (!b.enabled[g]) return;
-    PadFrame f = pad_frame(b, s, g);
     const Contact* contacts = b.contacts + (long long)env * p.max_contacts;
     int ncontact = b.ncontact[env] < p.max_contacts ? b.ncontact[env] : p.max_contacts;
     float inv_h = 1.0f / p.h, inv_h2 = inv_h * inv_h;
-    float margin_x = s.half_w + s.cell_x, margin_y = s.half_h + s.cell_y;
     for (int k = 0; k < ncontact; k++) {
         const Contact& c = contacts[k];
-        if (c.lambda_n <= 0.0f || (c.a != g && c.b != g)) continue;
+        if (c.lambda_n <= 0.0f || c.pad != sensor) continue;
         bool on_a = c.a == g;
         V3 n = {c.n[0], c.n[1], c.n[2]};
-        V3 push = on_a ? n : -n;  // direction the normal force pushes the pad's body
-        if (dot(push, f.nz) > -0.5f) continue;  // not on the pad's face
-        V3 pa, pb, ra, rb;
-        contact_points(b, c, pa, pb, ra, rb);
-        V3 rel = (on_a ? pa : pb) - f.origin;
-        if (fabsf(dot(rel, f.tx)) > margin_x || fabsf(dot(rel, f.ty)) > margin_y) continue;
         V3 on_first = n * (c.lambda_n * inv_h2 + c.normal_impulse * inv_h) +
                       V3{c.static_friction[0], c.static_friction[1], c.static_friction[2]} * inv_h2 +
                       V3{c.friction_impulse[0], c.friction_impulse[1], c.friction_impulse[2]} * inv_h;
@@ -475,6 +470,12 @@ PHYS_HD void tactile_accumulate(const Params& p, const Buffers& b, int env, int 
                 break;
             }
         }
+    }
+    if (s.coupled) {  // the gel's shear (solve_pad_shear), in place of friction
+        const float* st = pad_state(p, b, env, sensor);
+        acc[0] += st[kPadForce];
+        acc[1] += st[kPadForce + 1];
+        acc[2] += st[kPadForce + 2];
     }
 }
 
@@ -512,9 +513,11 @@ PHYS_HD void tactile_update(Exec& ex, const Params& p, const Buffers& b, int env
         force[1] = loaded ? Qy : 0.0f;
         force[2] = loaded ? W : 0.0f;
     });
+    float* coupling = pad_state(p, b, env, sensor);
     if (!loaded) {
         float* warm = tactile_problem(p, b, env, sensor).array(kWarm);
         ex.for_each(n, [&](int c) { warm[c] = 0.0f; });
+        ex.for_each(1, [&](int) { coupling[kPadNormalStiffness] = coupling[kPadShearStiffness] = 0.0f; });
         return;
     }
 
@@ -567,6 +570,20 @@ PHYS_HD void tactile_update(Exec& ex, const Params& p, const Buffers& b, int env
         for (int a = 0; a < na; a++) w += influence(K, nx, ix, iy, list[a]) * vals[a];
         out[kDeflection * n + c] = w;
     });
+
+    // The gel's stiffness at this contact, for the rigid solve: secant
+    // normal stiffness W / delta (delta: the deflection under the deepest
+    // point), and the initial tangential stiffness of a contact of this
+    // area, 2 E* sqrt(A / pi) / tangential_ratio (Mindlin; exact for
+    // circular contacts).
+    if (s.coupled) {
+        float delta = ex.maximum(na, [&](int a) { return out[kDeflection * n + unpack_cell(list[a], nx)]; });
+        float area = (float)na * s.cell_x * s.cell_y;
+        ex.for_each(1, [&](int) {
+            coupling[kPadNormalStiffness] = delta > 0.0f ? W / delta : 0.0f;
+            coupling[kPadShearStiffness] = 2.0f * s.e_star * sqrtf(area / 3.14159265f) / s.tangential_ratio;
+        });
+    }
 
     // Shear: the difference between the full load and a reduced one, which
     // starts from the full-load solution. Within 2% of the friction cone the

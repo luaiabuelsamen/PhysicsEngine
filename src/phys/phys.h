@@ -133,8 +133,17 @@ struct TactileSensorDesc {
     float youngs_modulus = 3e5f;    // Pa (DIGIT's Solaris gel: roughly 0.3 MPa)
     float poisson = 0.5f;
     float dome_radius = 0.0f;       // > 0: the gel bulges out, surface z = -r^2 / 2R
+    // Gel thickness: with coupling, objects sink at most half of it into the
+    // pad (the gel bottoms out on its backing; a sharp corner on a linear
+    // half-space would otherwise sink without limit).
+    float thickness = 0.004f;
     int max_iterations = 100;       // per contact solve
     float tolerance = 1e-4f;        // relative change of the cell forces
+    // Two-way coupling: contacts on the pad take the gel's compliance - they
+    // indent it as the gel model says, and friction is the gel's Mindlin
+    // shear (gradual stick-to-slip) instead of rigid Coulomb friction. Off:
+    // the pad only observes rigid contacts.
+    bool coupled = true;
 };
 
 struct ModelDesc {
