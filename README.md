@@ -105,6 +105,7 @@ More in `examples/`:
 |---|---|
 | `tactile_demo.py` | The GIF above: a fingertip pressed and dragged across three objects |
 | `tactile_gallery.py` | Simulated sensor images of five objects under a rising load |
+| `grasp_env.py`, `train_grasp.py`, `eval_grasp.py` | Fragile grasping: an RL task where touch matters, PPO, evaluation |
 | `ur5e_planner.py` / `.cpp` | Plan MoveL / MoveJ for a UR5e per env, track the plans under gravity |
 | `cartpole.py` | Vectorized CartPole from Python |
 | `rigid_pile.cpp`, `particle_pour.cpp`, `particle_bounce.cpp` | Rigid and particle solver demos (write GIFs via ffmpeg) |
@@ -175,6 +176,48 @@ reading into the images above.
   question.
 
 The analysis is in [docs/TACTILE.md](docs/TACTILE.md).
+
+## RL with touch: fragile grasping
+
+![Learned tactile grasping](docs/media/grasp_tactile.gif)
+
+`examples/grasp_env.py` is a batched RL task where touch matters:
+- **Setup.** A parallel-jaw gripper with a coupled gel pad on each finger
+  must lift a ball whose mass (0.05-0.4 kg) and friction (0.3-0.8) are
+  hidden and change every episode.
+- **Fragility.** The ball breaks if a pad presses harder than 1.5-2.5x the
+  least force that holds it, so the right grip spans a factor of 20. Squeeze
+  too little and it slips out; too much and it breaks.
+- **Control.** The lift is scripted; the policy adjusts the grip force.
+
+PPO (`examples/train_grasp.py`) is trained with three observation sets,
+18M env steps each, about 30 minutes on the Orin with all three training at
+once. The results below are
+from 4,096 held-out episodes (`examples/eval_grasp.py`):
+
+| Policy observes | Success | Broken | Dropped |
+|---|---|---|---|
+| (fixed grip, best: 2 N) | 28% | 32% | 41% |
+| finger positions and velocities, grip, time | 37% | 36% | 27% |
+| + each pad's normal and shear force | 36% | 17% | 47% |
+| **+ each pad's stick fraction** | **75%** | 25% | **0%** |
+| (oracle that knows mass and friction) | 100% | 0% | 0% |
+
+![Learning curves](docs/media/grasp_learning.png)
+
+**Why the stick fraction matters.**
+- Pad forces give the policy the ball's weight, not its friction, and that
+  is not enough.
+- The stick fraction is the share of the contact that still sticks. Under
+  Mindlin's theory it shrinks as the grip nears slip, so it measures how
+  close to slipping the grasp is without knowing the friction.
+- The policy that sees it learns a grip reflex: it tightens just enough as
+  the load comes on. It never drops a ball and only breaks the lightest,
+  grippiest ones, for which even its 0.4 N starting grip is too much.
+
+A contact model with a single friction state per contact, such as rigid
+Coulomb friction, cannot produce this signal; it needs a model of partial
+slip across the contact patch.
 
 ## Robots: URDF and the motion planner
 
@@ -293,7 +336,7 @@ Every number is a test or tool in this repo.
 ```
 src/phys/      the library: World, rigid / particle solvers, joints, tactile sensors, URDF import
 python/        Python package libphys (bindings, viz) and its tests
-examples/      demos (tactile, UR5e, CartPole, rigid / particle GIFs)
+examples/      demos (tactile, fragile-grasp RL, UR5e, CartPole, rigid / particle GIFs)
 tests/         C++ tests
 benchmarks/    bench_envs (batched RL envs), benchmark (particle solver vs CPU baselines)
 tools/         validation figures, MuJoCo reference check, Sparsh tactile data analysis

@@ -76,7 +76,10 @@ face take the gel's compliance inside the rigid solve:
   k_t = 2 E* sqrt(A / pi) / tangential_ratio is the initial tangential
   stiffness of a contact of area A, taken from the last tactile solve. The
   deflection is critically damped while the contact sticks; beyond u* the
-  pad slides at mu W.
+  pad slides at mu W. The shear is applied last in the velocity solve.
+  Otherwise the restitution step of an object's other contacts (a ball
+  resting on a table) zeroes the velocity the gel gives it, and the object
+  can never be lifted off.
 - **Coverage.** The gel is taken to cover the face around the pad: contacts
   up to one pad size outside it are coupled too. Otherwise an indented
   contact sliding off the sensing area would turn rigid and be ejected.
@@ -111,6 +114,8 @@ fixed sphere by slider forces, then sheared:
 | Mindlin stick radius at Q / mu W = 0.3, 0.6, 0.8 | within one cell (0.375 mm) |
 | Full slip: every cell slides, abs(q) proportional to p, Q = mu W | exact |
 | Step-to-step scatter of the pad force at 10 substeps, under shear | < 1e-5 N |
+| Two pads lift a ball off a table: grip 3 N holds, 1 N (< m g / 2 mu) slips out | yes |
+| A corner pressed at 3 N: force, indentation limit | exact; 2.00 mm |
 | Flat pad on a floor: load, full contact, edge pressure rise | 0.01%; 400 / 400 cells; 3.9x the centre |
 | CPU vs CUDA | bit-identical |
 

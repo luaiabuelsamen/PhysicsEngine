@@ -371,6 +371,76 @@ void test_coupled_corner() {
     CHECK(indent > 0.0f && indent < 0.5f * t.thickness * 1.05f);
 }
 
+// Two coupled pads squeeze a ball resting on a table and lift it: the gel's
+// shear must carry the ball off the table (an earlier bug let the table
+// contact's restitution cancel it, so the ball never left the table), and
+// a grip below m g / (2 mu) must let it slip out.
+void test_coupled_lift() {
+    const float R = 0.03f, mass = 0.2f, mu = 0.6f;
+    ModelDesc m;
+    m.gravity = {0.0f, 0.0f, -9.81f};
+    m.substeps = 10;
+    BodyDesc table = BodyDesc::plane();
+    BodyDesc carriage = BodyDesc::none(0.5f, {1e-3f, 1e-3f, 1e-3f});
+    BodyDesc finger = BodyDesc::box({0.004f, 0.015f, 0.015f}, 0.05f);
+    BodyDesc ball = BodyDesc::sphere(R, mass);
+    finger.friction = ball.friction = mu;
+    finger.restitution = ball.restitution = 0.0f;
+    m.bodies = {table, carriage, finger, finger, ball};  // 0 .. 4
+    JointDesc lift = JointDesc::slider(-1, 1, {0, 0, R}, {0, 0, 0}, {0, 0, 1});
+    lift.actuator = Actuator::Position;
+    lift.kp = 3000.0f;
+    lift.kd = 150.0f;
+    m.joints = {lift};
+    for (int side : {-1, 1}) {
+        JointDesc j = JointDesc::slider(1, side < 0 ? 2 : 3, {side * (R + 0.016f), 0, 0}, {0, 0, 0}, {1, 0, 0});
+        j.actuator = Actuator::Torque;
+        j.limited = true;
+        j.lower = -0.015f;
+        j.upper = 0.015f;
+        j.damping = 20.0f;
+        m.joints.push_back(j);
+        TactileSensorDesc t;
+        t.body = side < 0 ? 2 : 3;
+        t.origin = {-side * 0.004f, 0.0f, 0.0f};
+        float q = std::sqrt(0.5f);
+        t.frame = {q, 0.0f, -side * q, 0.0f};
+        t.width = t.height = 0.03f;
+        t.nx = t.ny = 12;
+        m.tactile_sensors.push_back(t);
+    }
+    const std::vector<float> grip = {1.0f, 3.0f};  // N; holding needs m g / (2 mu) = 1.64 N
+    World w(m, (int)grip.size(), Device::CUDA);
+    HostState s(5 * (int)grip.size());
+    float q = std::sqrt(0.5f);
+    for (int e = 0; e < (int)grip.size(); e++) {
+        s.qw[e * 5] = s.qx[e * 5] = q;  // table faces +z
+        for (int b = 1; b < 5; b++) s.pz[e * 5 + b] = R;
+        s.px[e * 5 + 2] = -(R + 0.016f);
+        s.px[e * 5 + 3] = R + 0.016f;
+    }
+    w.set_state(s);
+    std::vector<float> ctrl(3 * grip.size());
+    for (int k = 0; k < 90; k++) {  // 0.5 s squeezing, then 1 s lifting at 0.1 m/s
+        float t = k / 60.0f;
+        for (int e = 0; e < (int)grip.size(); e++) {
+            ctrl[e * 3 + 0] = std::fmax(t - 0.5f, 0.0f) * 0.1f;
+            ctrl[e * 3 + 1] = grip[e];
+            ctrl[e * 3 + 2] = -grip[e];
+        }
+        w.set_controls(ctrl);
+        w.step(1.0f / 60.0f);
+    }
+    HostState out;
+    w.get_state(out);
+    for (int e = 0; e < (int)grip.size(); e++) {
+        float rise = out.pz[e * 5 + 4] - R, carried = out.pz[e * 5 + 1] - R;
+        std::printf("  grip %.1f N: gripper rose %.1f mm, ball rose %.1f mm\n", grip[e], carried * 1e3f, rise * 1e3f);
+    }
+    CHECK(out.pz[0 * 5 + 4] - R < 0.005f);           // too weak: slips out
+    CHECK(out.pz[1 * 5 + 4] - R > 0.09f);            // holds: lifted with the gripper
+}
+
 // With coupling off the pad only observes the rigid contact (which, pushed
 // through joints, chatters by a few percent step to step).
 void test_uncoupled() {
@@ -401,6 +471,7 @@ int main() {
         {"coupled_indentation_and_mindlin", test_coupled_indentation_and_mindlin},
         {"coupled_steady", test_coupled_steady},
         {"coupled_corner", test_coupled_corner},
+        {"coupled_lift", test_coupled_lift},
         {"uncoupled", test_uncoupled},
     };
     for (const Test& t : tests) {
