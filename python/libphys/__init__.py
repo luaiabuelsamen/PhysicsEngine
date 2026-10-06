@@ -221,6 +221,7 @@ class World:
         self.device = device
         dev = {"cuda": Device.CUDA, "cpu": Device.CPU}[device]
         self._world = _libphys.World(desc, num_envs, dev)
+        self._bodies = list(desc.bodies)
         cuda = dev == Device.CUDA
         views = {name: _view(self, ptr, tuple(shape), typestr, cuda)
                  for name, (ptr, shape, typestr) in self._world._buffers().items()}

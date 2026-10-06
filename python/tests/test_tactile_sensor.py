@@ -57,3 +57,14 @@ def test_cpu_and_cuda_agree():
     b = pressed_pad("cuda", [1.0, 1.5], resolution=(12, 12))
     b.synchronize()
     assert torch.equal(a.tactile[0], b.tactile[0].cpu())
+
+
+def test_viz_renders():
+    pytest.importorskip("scipy")
+    from libphys import viz
+    w = pressed_pad("cpu", [1.0], resolution=(12, 12))
+    img = viz.render(w, 0, viz.Camera(eye=(0.06, -0.08, 0.05), size=(64, 48)))
+    assert img.size == (64, 48)
+    reading = w.tactile[0][0]
+    assert viz.gelsight(reading, 0.001, scale=4).size == (48, 48)
+    assert viz.tactile_map(reading, scale=4).size == (48, 48)
