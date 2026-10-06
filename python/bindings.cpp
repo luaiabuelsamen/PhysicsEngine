@@ -177,8 +177,10 @@ PYBIND11_MODULE(_libphys, m) {
         .def_readwrite("youngs_modulus", &TactileSensorDesc::youngs_modulus)
         .def_readwrite("poisson", &TactileSensorDesc::poisson)
         .def_readwrite("dome_radius", &TactileSensorDesc::dome_radius)
+        .def_readwrite("thickness", &TactileSensorDesc::thickness)
         .def_readwrite("max_iterations", &TactileSensorDesc::max_iterations)
-        .def_readwrite("tolerance", &TactileSensorDesc::tolerance);
+        .def_readwrite("tolerance", &TactileSensorDesc::tolerance)
+        .def_readwrite("coupled", &TactileSensorDesc::coupled);
 
     py::class_<ModelDesc>(m, "ModelDesc")
         .def(py::init<>())

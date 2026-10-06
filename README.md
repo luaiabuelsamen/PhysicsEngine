@@ -8,16 +8,19 @@ body report what a gel fingertip would feel:
 - the gel's deformation;
 - where the contact sticks or slips.
 
-The pads solve real contact mechanics rather than penalty springs. Every
-result is checked against exact solutions, MuJoCo, or real GelSight / DIGIT
-data.
+The pads solve real contact mechanics rather than penalty springs, and
+the gel acts back on the dynamics: objects indent it as far as the gel
+model says, and grip turns into slip gradually, as Mindlin's theory
+predicts. Every result is checked against exact solutions, MuJoCo, or real
+GelSight / DIGIT data.
 
 ![A gel fingertip pressed onto and dragged across three objects](docs/media/tactile_demo.gif)
 
 *One env per row, simulated together. Left: the scene. Middle: the gel as a
 GelSight camera would see it, shaded from the simulated deflection. Right:
-pressure, shear (arrows) and the sticking zone (white outline). It sticks
-while pressed, then slips fully once dragged.*
+pressure, shear (arrows) and the sticking zone (white outline). Pressed, the
+contact sticks; dragged, the stick zone shrinks from the edges inwards until
+the whole contact slides.*
 
 **What's in it**
 
@@ -32,7 +35,10 @@ while pressed, then slips fully once dragged.*
   - The gel is an elastic half-space. It gives Hertz pressure under curved
     objects, Mindlin partial slip under shear, and the deflection map that
     vision-based sensors image.
-  - About 140k env-steps/s with a 16 × 16 pad on a Jetson Orin NX.
+  - Two-way coupled: the gel's normal and shear compliance act in the rigid
+    solve, so indentation and the stick-to-slip transition come out of the
+    dynamics.
+  - About 185k env-steps/s with a 16 × 16 pad on a Jetson Orin NX.
 - **Robots.**
   - URDF import.
   - A C++ motion planner (forward / inverse kinematics, MoveJ, MoveL) whose
@@ -108,7 +114,7 @@ More in `examples/`:
 ![Simulated sensor images](docs/media/tactile_gallery.gif)
 
 `model.add_tactile_sensor(body, origin, frame, width, height, resolution,
-youngs_modulus, poisson, dome_radius)` puts a rectangular gel pad on a body,
+youngs_modulus, poisson, dome_radius, thickness, coupled)` puts a rectangular gel pad on a body,
 on the face of its collision shape that touches things. The pad's normal is
 the +z axis of `frame`.
 
@@ -128,18 +134,27 @@ After every step, `world.tactile[i]` holds sensor `i`'s cells as
 
 How it works (details in [docs/TACTILE.md](docs/TACTILE.md)):
 
-1. **The load comes from the rigid solver.** It is the contact force on the
-   pad's face, averaged over the step's substeps.
-2. **The gap comes from the touching objects.** Rays are cast from every cell
+1. **The gel acts in the rigid solve (two-way coupling, `coupled=True`).**
+   Contacts on a pad become compliant, with the gel's stiffness from the last
+   step's tactile solve, so an object indents the pad as far as the gel
+   model says. Friction on the pad is the gel's shear: Mindlin's force law,
+   Q = μW[1 − (1 − u/u*)^{3/2}], acting on a persistent shear deflection u,
+   so grip turns into slip over a fraction of a millimetre instead of at
+   once.
+2. **The pad's load is the contact force on its face,** averaged over the
+   step's substeps.
+3. **The gap comes from the touching objects.** Rays are cast from every cell
    along the pad normal against their shapes.
-3. **Pressure is solved for that load.** The pad solves the elastic
+4. **Pressure is solved for that load.** The pad solves the elastic
    half-space contact problem, so the pressure is consistent with both the
    shape and the load (Polonsky–Keer conjugate gradient, warm-started across
    steps).
-4. **Shear and the stick zone use the Ciavarella–Jäger construction.** It is
-   the exact partial-slip solution under monotonic shear.
-5. **One CUDA block per (env, sensor).** The CPU backend reproduces the GPU
+5. **Shear and the stick zone use the Ciavarella–Jäger construction,** the
+   same Mindlin theory as the dynamics.
+6. **One CUDA block per (env, sensor).** The CPU backend reproduces the GPU
    bit for bit.
+
+With `coupled=False` a pad only observes ordinary rigid contacts.
 
 ![Validation against Hertz and Mindlin](docs/media/tactile_validation.png)
 
@@ -225,12 +240,13 @@ Every number is a test or tool in this repo.
 
 | Area | Check | Result |
 |---|---|---|
-| Contacts | Elastic bounce height; rolling sphere (5/7 v₀); sliding box stops at v²/2μg | 0.1%, 0.01%, 0.03% |
-| Contacts | Box resting / dropped, 5-box stack, tipping box, capsule at rest | no drift > 0.1 mm |
+| Contacts | Elastic bounce height; rolling sphere (5/7 v₀); sliding box stops at v²/2μg | 0.15%, 0.01%, 0.03% |
+| Contacts | Box resting / dropped; 5-box stack of 1 m boxes; tipping box; capsule at rest | < 0.1 mm drift; 7 mm; topples / settles as expected |
 | Joints | Pendulum period | 0.02% |
 | Joints | Double pendulum, cart-pole vs exact equations of motion (references checked against MuJoCo to 1e-13) | 0.009 rad, 0.006 rad / 0.4 mm at 40 substeps |
 | Actuators | PD steady state under gravity; force-limited velocity drive | 2e-5 rad; 0.01% |
-| Tactile pads | Pad load vs applied; Hertz radius / peak pressure / indentation; Mindlin stick radius; full slip | 0.02%; 0.5% / 1% / 0.6%; within one cell; exact |
+| Tactile pads | Pad load vs applied; Hertz radius / peak pressure; Mindlin stick radius; full slip | 0.02%; 0.5% / 1%; within one cell; exact |
+| Tactile coupling | The pad body's indentation vs Hertz; its shear displacement vs Mindlin; step-to-step force scatter at 10 substeps | 0.6%; < 0.5%; < 1e-5 |
 | Tactile patch | Hertz, flat punch, Cattaneo–Mindlin, Masing hysteresis (standalone `ElasticPatch`) | 0.07–2% |
 | Robots | UR5e: URDF tree FK vs the planner's FK; arm held under gravity | 7e-16 m; 4e-4 rad |
 | Backends | CPU vs CUDA, run-to-run, env independence | bit-identical |
@@ -239,29 +255,28 @@ Every number is a test or tool in this repo.
 
 | Workload | Throughput |
 |---|---|
-| CartPole from Python, 4,096 envs | 438k env-steps/s |
-| 10 falling shapes per env, 4,096 envs (`bench_envs pile`) | 450k env-steps/s (22× one CPU core) |
-| 12-joint actuated hand + cube, 1,024 envs (`bench_envs hand`) | 51k env-steps/s |
-| Pad pressed and dragged over a sphere, 4,096 envs: no sensor / 16 × 16 pad / 32 × 32 pad | 965k / 139k / 15k env-steps/s |
-| UR5e tracking planned trajectories, 512 envs, from Python | 100k env-steps/s |
+| CartPole from Python, 4,096 envs | 345k env-steps/s |
+| 10 falling shapes per env, 4,096 envs (`bench_envs pile`) | 409k env-steps/s |
+| 12-joint actuated hand + cube, 1,024 envs (`bench_envs hand`) | 48k env-steps/s |
+| Pad pressed onto a sphere under shear, 4,096 envs: no sensor / 16 × 16 pad / 32 × 32 pad (coupled) | 881k / 185k / 25k env-steps/s |
+| UR5e tracking planned trajectories, 512 envs, from Python | 101k env-steps/s |
 | 100,000 spheres in one scene, particle solver (`benchmark`) | 373 ms / 50 steps |
 
 ## Limitations
 
-- **One-way tactile coupling.** The gel's compliance doesn't feed back into
-  the rigid contact. So the stick-to-slip transition takes a step or two
-  instead of the ~1 mm of slide real gels show, and shear has no hysteresis
-  under reversal (the standalone `ElasticPatch` has both). This is the next
-  thing to fix.
-- **Stiff rigid contacts chatter.** When pushed through joints, the pad force
-  scatters step to step:
-
-  | Setting | Scatter |
-  |---|---|
-  | 10 substeps, under shear | ~8% |
-  | 40 substeps, loads ≥ 3 N | ~2% |
-
-  The means are exact.
+- **No shear hysteresis yet.** The coupled shear follows Mindlin's loading
+  curve both ways, so partial-slip unloading and reversal dissipate nothing
+  until the contact fully slides (the standalone `ElasticPatch` has Masing
+  hysteresis).
+- **The gel covers the face.** Coupling applies to contacts within one pad
+  size of a pad on its face, so place pads over the faces that touch things.
+- **Linear gel.** The gel is a linear elastic half-space. A sharp corner is
+  a point load on it, so coupled indentation is capped at half the gel's
+  `thickness` (it bottoms out on its backing).
+- **Uncoupled rigid contacts chatter.** When pushed through joints, a rigid
+  contact's force scatters step to step: about 8% at 10 substeps under
+  shear, 2% at 40 substeps above 3 N. The means are exact, and coupled pads
+  don't chatter.
 - **Large pads are slow.** The pad's influence sums are dense; 32 × 32 is
   about 10× slower than 16 × 16.
 - **Damped joints.** Position-based joints are damped at first order in the

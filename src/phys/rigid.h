@@ -97,6 +97,9 @@ PHYS_HD bool is_dynamic(const Params& p, const Buffers& b, int g) {
     return g >= 0 && b.inv_mass[g % p.nbody] > 0.0f;
 }
 
+// Current position of body g.
+PHYS_HD V3 body_pos(const Buffers& b, int g) { return load3(b.pos, g); }
+
 PHYS_HD Q4 body_quat(const Buffers& b, int g) {
     return g >= 0 ? load4(b.quat, g) : Q4{1.0f, 0.0f, 0.0f, 0.0f};
 }
@@ -225,7 +228,7 @@ PHYS_HD void emit_contact(ContactSink& s, int a, int c, V3 pa, V3 pb, V3 n) {
     if (s.count < s.p.max_contacts) {
         const Params& p = s.p;
         const Buffers& b = s.b;
-        V3 xa = load3(b.pos, a), xb = load3(b.pos, c);
+        V3 xa = body_pos(b, a), xb = body_pos(b, c);
         Q4 qa = load4(b.quat, a), qb = load4(b.quat, c);
         V3 ra = inv_rotate(qa, pa - xa);
         V3 rb = inv_rotate(qb, pb - xb);
@@ -243,6 +246,8 @@ PHYS_HD void emit_contact(ContactSink& s, int a, int c, V3 pa, V3 pb, V3 n) {
         k.static_friction[0] = k.static_friction[1] = k.static_friction[2] = 0.0f;
         k.friction_impulse[0] = k.friction_impulse[1] = k.friction_impulse[2] = 0.0f;
         k.normal_impulse = 0.0f;
+        k.pad = -1;
+        k.compliance = 0.0f;
         k.vn_pre = dot(va - vb, n);
         k.mu = 0.5f * (b.friction[ia] + b.friction[ib]);
         k.e = 0.5f * (b.restitution[ia] + b.restitution[ib]);
@@ -304,7 +309,7 @@ PHYS_HD void sphere_box(ContactSink& s, int a, V3 ca, float r, int c) {
 }
 
 PHYS_HD void capsule_ends(const Params& p, const Buffers& b, int g, V3& e0, V3& e1) {
-    V3 x = load3(b.pos, g);
+    V3 x = body_pos(b, g);
     V3 axis = rotate(load4(b.quat, g), V3{0.0f, b.size[3 * (g % p.nbody) + 1], 0.0f});
     e0 = x - axis;
     e1 = x + axis;
@@ -376,7 +381,7 @@ struct Box {
 
 PHYS_HD Box load_box(const Params& p, const Buffers& b, int g) {
     Box box;
-    box.c = load3(b.pos, g);
+    box.c = body_pos(b, g);
     Q4 q = load4(b.quat, g);
     box.ax[0] = rotate(q, V3{1.0f, 0.0f, 0.0f});
     box.ax[1] = rotate(q, V3{0.0f, 1.0f, 0.0f});
@@ -515,7 +520,7 @@ PHYS_HD void collide_pair(ContactSink& s, int i, int j) {
     if (!is_dynamic(p, b, i) && !is_dynamic(p, b, j)) return;
     if (!b.may_collide[(i % p.nbody) * p.nbody + j % p.nbody]) return;
     if (si != kPlane && sj != kPlane) {
-        V3 d = load3(b.pos, i) - load3(b.pos, j);
+        V3 d = body_pos(b, i) - body_pos(b, j);
         float reach = b.radius[i % p.nbody] + b.radius[j % p.nbody];
         if (dot(d, d) > reach * reach) return;
     }
@@ -530,9 +535,9 @@ PHYS_HD void collide_pair(ContactSink& s, int i, int j) {
     V3 a0, a1, c0, c1;
 
     if (si == kSphere) {
-        V3 ca = load3(b.pos, a);
+        V3 ca = body_pos(b, a);
         if (sj == kSphere) {
-            spheres(s, a, ca, ra, c, load3(b.pos, c), rc);
+            spheres(s, a, ca, ra, c, body_pos(b, c), rc);
         } else if (sj == kCapsule) {
             capsule_ends(p, b, c, c0, c1);
             spheres(s, a, ca, ra, c, closest_on_segment(c0, c1, ca), rc);
@@ -584,7 +589,7 @@ PHYS_HD JointFrame joint_frame(const Buffers& b, int g, const float anchor[3],
     if (g < 0) return {a, f, V3{0.0f, 0.0f, 0.0f}};
     Q4 q = load4(b.quat, g);
     V3 r = rotate(q, a);
-    return {load3(b.pos, g) + r, qmul(q, f), r};
+    return {body_pos(b, g) + r, qmul(q, f), r};
 }
 
 PHYS_HD V3 frame_axis(Q4 rot, int k) {
@@ -684,8 +689,16 @@ PHYS_HD void solve_joint_position(const Params& p, const Buffers& b, int env, in
     V3 delta = fp.point - fc.point;
     if (jm.type == kSlider) {
         V3 ex = frame_axis(fp.rot, 0);
-        float d = -dot(delta, ex);  // child offset along the axis
-        V3 corr = delta + ex * d;
+        // The lateral error, with the axial part removed exactly: in the
+        // joint frame the axis is x, so zero x there. Projecting with the
+        // float axis instead (delta - ex (ex . delta)) leaves an axial part
+        // of ~1e-7 times the slider's travel - the same tiny push every
+        // substep, which feeds momentum along the axis and biases every
+        // force balance on it.
+        V3 local = inv_rotate(fp.rot, delta);
+        float d = -local.x;  // child offset along the axis
+        local.x = 0.0f;
+        V3 corr = rotate(fp.rot, local);
         if (jm.limited) {
             if (d < jm.lower) corr = corr + ex * (jm.lower - d);
             if (d > jm.upper) corr = corr + ex * (jm.upper - d);
@@ -832,9 +845,212 @@ PHYS_HD void contact_points(const Buffers& b, const Contact& k, V3& pa, V3& pb, 
                             V3& rb) {
     ra = rotate(load4(b.quat, k.a), V3{k.ra[0], k.ra[1], k.ra[2]});
     rb = rotate(load4(b.quat, k.b), V3{k.rb[0], k.rb[1], k.rb[2]});
-    pa = load3(b.pos, k.a) + ra;
-    pb = load3(b.pos, k.b) + rb;
+    pa = body_pos(b, k.a) + ra;
+    pb = body_pos(b, k.b) + rb;
 }
+
+// Velocity impulse of size `magnitude` along dir (a gets +dir, b -dir).
+PHYS_HD void apply_contact_impulse(const Params& p, const Buffers& b, const Contact& k, V3 ra,
+                                   V3 rb, V3 P) {
+    apply_velocity_impulse(p, b, k.a, ra, P);
+    apply_velocity_impulse(p, b, k.b, rb, -P);
+}
+
+PHYS_HD V3 relative_velocity(const Buffers& b, const Contact& k, V3 ra, V3 rb) {
+    V3 va = load3(b.vel, k.a) + cross(load3(b.angvel, k.a), ra);
+    V3 vb = load3(b.vel, k.b) + cross(load3(b.angvel, k.b), rb);
+    return va - vb;
+}
+
+// --- tactile pads in the rigid solve -----------------------------------------
+//
+// Contacts on the face of a tactile pad (phys::TactileSensorDesc) whose
+// sensor is `coupled` take the gel's compliance:
+//   normal      a compliant constraint whose stiffness is the gel's secant
+//               stiffness W / delta from the last tactile solve, shared by
+//               the pad's contacts, so the bodies indent the gel as far as
+//               the gel model says;
+//   tangential  instead of rigid static / dynamic friction, a persistent
+//               shear deflection u of the gel with Mindlin's force law
+//               Q = mu W (1 - (1 - |u| / u*)^(3/2)), u* = 3 mu W / (2 k_t),
+//               critically damped while it sticks; beyond u* the pad slides.
+// The tactile solve (tactile_sensor.h) uses the same theory for the stick
+// zone, and refreshes the stiffnesses from the contact it finds.
+
+struct PadFrame {
+    V3 origin, tx, ty, nz;
+};
+
+PHYS_HD PadFrame pad_frame(const Buffers& b, const TactileModel& s, int g) {
+    Q4 qb = load4(b.quat, g);
+    Q4 q = qmul(qb, Q4{s.frame[0], s.frame[1], s.frame[2], s.frame[3]});
+    PadFrame f;
+    f.origin = body_pos(b, g) + rotate(qb, V3{s.origin[0], s.origin[1], s.origin[2]});
+    f.tx = rotate(q, V3{1.0f, 0.0f, 0.0f});
+    f.ty = rotate(q, V3{0.0f, 1.0f, 0.0f});
+    f.nz = rotate(q, V3{0.0f, 0.0f, 1.0f});
+    return f;
+}
+
+// The sensor whose pad contact c presses on, or -1: the contact involves the
+// pad's body and pushes it against the pad normal, at most one pad size
+// beyond the pad's edges (the gel is taken to cover the face around the pad,
+// so an indented contact that slides off the sensing area does not turn
+// rigid at once). The nearest pad wins.
+PHYS_HD int pad_of_contact(const Params& p, const Buffers& b, const Contact& c) {
+    int env = c.a / p.nbody;
+    int best = -1;
+    float best_out = 0.0f;
+    for (int s = 0; s < p.nsensor; s++) {
+        const TactileModel& m = b.sensors[s];
+        int g = env * p.nbody + m.body;
+        if (c.a != g && c.b != g) continue;
+        bool on_a = c.a == g;
+        V3 n = {c.n[0], c.n[1], c.n[2]};
+        PadFrame f = pad_frame(b, m, g);
+        if (dot(on_a ? n : -n, f.nz) > -0.5f) continue;  // not on the pad's face
+        V3 pa, pb, ra, rb;
+        contact_points(b, c, pa, pb, ra, rb);
+        V3 rel = (on_a ? pa : pb) - f.origin;
+        float ox = fmaxf(fabsf(dot(rel, f.tx)) - m.half_w, 0.0f), oy = fmaxf(fabsf(dot(rel, f.ty)) - m.half_h, 0.0f);
+        float out = sqrtf(ox * ox + oy * oy);  // distance outside the pad
+        if (out > 2.0f * fmaxf(m.half_w, m.half_h)) continue;
+        if (best < 0 || out < best_out) {
+            best = s;
+            best_out = out;
+        }
+    }
+    return best;
+}
+
+PHYS_HD float* pad_state(const Params& p, const Buffers& b, int env, int s) {
+    return b.tactile_coupling + ((long long)env * p.nsensor + s) * kPadState;
+}
+
+// Tag this substep's contacts with their pads and give the contacts on
+// coupled pads their share of the gel's normal compliance.
+PHYS_HD void tag_pad_contacts(const Params& p, const Buffers& b, int env, Contact* contacts, int n) {
+    for (int k = 0; k < n; k++) contacts[k].pad = pad_of_contact(p, b, contacts[k]);
+    for (int k = 0; k < n; k++) {
+        int s = contacts[k].pad;
+        if (s < 0 || !b.sensors[s].coupled) continue;
+        int share = 0;
+        for (int j = 0; j < n; j++) share += contacts[j].pad == s ? 1 : 0;
+        float stiffness = pad_state(p, b, env, s)[kPadNormalStiffness];
+        if (!(stiffness > 0.0f)) stiffness = b.sensors[s].default_stiffness;
+        contacts[k].compliance = (float)share / stiffness;
+    }
+}
+
+// The gel's shear on every coupled pad of env `env`, applied as velocity
+// impulses after the position solve of a substep.
+PHYS_HD void solve_pad_shear(const Params& p, const Buffers& b, int env) {
+    const Contact* contacts = b.contacts + (long long)env * p.max_contacts;
+    int n = b.ncontact[env] < p.max_contacts ? b.ncontact[env] : p.max_contacts;
+    float inv_h2 = 1.0f / (p.h * p.h);
+    for (int s = 0; s < p.nsensor; s++) {
+        const TactileModel& m = b.sensors[s];
+        if (!m.coupled) continue;
+        float* st = pad_state(p, b, env, s);
+        int g = env * p.nbody + m.body;
+        // Load, friction coefficient and centre of the pad's contacts, and
+        // the body pressing hardest.
+        float lambda = 0.0f, mu = 0.0f, best = 0.0f;
+        V3 centre = {0.0f, 0.0f, 0.0f};
+        int other = -1;
+        for (int k = 0; k < n; k++) {
+            const Contact& c = contacts[k];
+            if (c.pad != s || c.lambda_n <= 0.0f) continue;
+            V3 pa, pb, ra, rb;
+            contact_points(b, c, pa, pb, ra, rb);
+            centre = centre + (c.a == g ? pa : pb) * c.lambda_n;
+            lambda += c.lambda_n;
+            mu += c.mu * c.lambda_n;
+            if (c.lambda_n > best) {
+                best = c.lambda_n;
+                other = c.a == g ? c.b : c.a;
+            }
+        }
+        st[kPadForce] = st[kPadForce + 1] = st[kPadForce + 2] = 0.0f;
+        // Critical damping of the gel's normal motion at each contact, in
+        // place of restitution; it may slow separation but never makes the
+        // contact pull.
+        for (int k = 0; k < n; k++) {
+            Contact& c = b.contacts[(long long)env * p.max_contacts + k];
+            if (c.pad != s || c.lambda_n <= 0.0f || c.compliance <= 0.0f) continue;
+            V3 nn = {c.n[0], c.n[1], c.n[2]};
+            V3 pa, pb, ra, rb;
+            contact_points(b, c, pa, pb, ra, rb);
+            float vn = dot(relative_velocity(b, c, ra, rb), nn);
+            float w = generalized_inv_mass(p, b, c.a, load4(b.quat, c.a), ra, nn) +
+                      generalized_inv_mass(p, b, c.b, load4(b.quat, c.b), rb, nn);
+            if (w <= 0.0f) continue;
+            float damping = 2.0f * sqrtf(1.0f / (c.compliance * w));
+            float j = -damping * vn * p.h;
+            j = fmaxf(fminf(j, fabsf(vn) / w), -fabsf(vn) / w);   // never reverse the motion
+            j = fmaxf(j, -c.lambda_n / p.h);                       // never pull
+            apply_contact_impulse(p, b, c, ra, rb, nn * j);
+            c.normal_impulse += j;
+        }
+        if (lambda <= 0.0f || other < 0) {
+            st[kPadShearX] = st[kPadShearY] = 0.0f;
+            continue;
+        }
+        centre = centre * (1.0f / lambda);
+        mu /= lambda;
+        float W = lambda * inv_h2;
+        PadFrame f = pad_frame(b, m, g);
+        V3 rp = centre - body_pos(b, g), ro = centre - body_pos(b, other);
+        // The gel shears by the object's motion relative to the pad over the
+        // substep (velocities are the substep's displacement / h).
+        V3 dp = (body_vel(b, g) + cross(body_angvel(b, g), rp)) * p.h;
+        V3 dobj = (body_vel(b, other) + cross(body_angvel(b, other), ro)) * p.h;
+        V3 d = dobj - dp;
+        float ux = st[kPadShearX] + dot(d, f.tx), uy = st[kPadShearY] + dot(d, f.ty);
+        float kt = st[kPadShearStiffness];
+        if (!(kt > 0.0f)) kt = m.default_stiffness / m.tangential_ratio;
+        float ustar = 1.5f * mu * W / kt;
+        float u = sqrtf(ux * ux + uy * uy);
+        bool sliding = u >= ustar;
+        if (sliding && u > 0.0f) {
+            ux *= ustar / u;
+            uy *= ustar / u;
+            u = ustar;
+        }
+        st[kPadShearX] = ux;
+        st[kPadShearY] = uy;
+        if (!(u > 0.0f) || !(ustar > 0.0f)) continue;
+        float x = 1.0f - u / ustar;
+        float Q = mu * W * (1.0f - x * sqrtf(x));
+        V3 dir = (f.tx * ux + f.ty * uy) * (1.0f / u);
+        V3 J = dir * (Q * p.h);  // impulse on the pad, along the object's motion
+        // Critical damping of the stuck gel: oppose the relative tangential
+        // velocity, never reversing it.
+        if (!sliding) {
+            V3 vrel = body_vel(b, other) + cross(body_angvel(b, other), ro) - body_vel(b, g) -
+                      cross(body_angvel(b, g), rp);
+            V3 vt = vrel - f.nz * dot(vrel, f.nz);
+            float vlen = length(vt);
+            if (vlen > 1e-12f) {
+                V3 t = vt * (1.0f / vlen);
+                float w = generalized_inv_mass(p, b, g, body_quat(b, g), rp, t) +
+                          generalized_inv_mass(p, b, other, body_quat(b, other), ro, t);
+                if (w > 0.0f) {
+                    float c = 2.0f * sqrtf(kt / w);
+                    float jd = fminf(c * vlen * p.h, vlen / w);
+                    J = J + t * jd;
+                }
+            }
+        }
+        apply_velocity_impulse(p, b, g, rp, J);
+        apply_velocity_impulse(p, b, other, ro, -J);
+        V3 F = J * (1.0f / p.h);
+        st[kPadForce] = F.x;
+        st[kPadForce + 1] = F.y;
+        st[kPadForce + 2] = F.z;
+    }
+}
+
 
 // Positional correction of size `magnitude` along dir (a moves +dir, b -dir).
 // Returns the Lagrange multiplier increment, or 0 if neither body can move.
@@ -855,12 +1071,30 @@ PHYS_HD void solve_contact_position(const Params& p, const Buffers& b, Contact& 
     V3 pa, pb, ra, rb;
     contact_points(b, k, pa, pb, ra, rb);
     float depth = dot(pb - pa, n);
+    if (k.compliance > 0.0f) {
+        // Compliant (XPBD): settles where depth = compliance * force.
+        if (depth <= 0.0f && k.lambda_n <= 0.0f) return;
+        float alpha = k.compliance / (p.h * p.h);
+        float w = generalized_inv_mass(p, b, k.a, load4(b.quat, k.a), ra, n) +
+                  generalized_inv_mass(p, b, k.b, load4(b.quat, k.b), rb, n);
+        if (w + alpha <= 0.0f) return;
+        float dl = fmaxf((depth - alpha * k.lambda_n) / (w + alpha), -k.lambda_n);  // never pull
+        // The gel bottoms out on its backing: no deeper than the pad allows.
+        float limit = k.pad >= 0 ? b.sensors[k.pad].max_indentation : 0.0f;
+        float beyond = depth - w * dl - limit;
+        if (limit > 0.0f && beyond > 0.0f) dl += beyond / w;
+        V3 P = n * dl;
+        apply_position_impulse(p, b, k.a, ra, P);
+        apply_position_impulse(p, b, k.b, rb, -P);
+        k.lambda_n += dl;
+        return;
+    }
     if (depth <= 0.0f) return;
     k.lambda_n += correct_positions(p, b, k, ra, rb, n, depth);
 }
 
 PHYS_HD void solve_contact_static_friction(const Params& p, const Buffers& b, Contact& k) {
-    if (k.lambda_n <= 0.0f) return;
+    if (k.lambda_n <= 0.0f || k.compliance > 0.0f) return;  // coupled pads: solve_pad_shear
     V3 n = {k.n[0], k.n[1], k.n[2]};
     V3 pa, pb, ra, rb;
 
@@ -890,25 +1124,14 @@ PHYS_HD void solve_contact_static_friction(const Params& p, const Buffers& b, Co
     k.static_friction[2] = total.z;
 }
 
-// Velocity impulse of size `magnitude` along dir (a gets +dir, b -dir).
-PHYS_HD void apply_contact_impulse(const Params& p, const Buffers& b, const Contact& k, V3 ra,
-                                   V3 rb, V3 P) {
-    apply_velocity_impulse(p, b, k.a, ra, P);
-    apply_velocity_impulse(p, b, k.b, rb, -P);
-}
 
-PHYS_HD V3 relative_velocity(const Buffers& b, const Contact& k, V3 ra, V3 rb) {
-    V3 va = load3(b.vel, k.a) + cross(load3(b.angvel, k.a), ra);
-    V3 vb = load3(b.vel, k.b) + cross(load3(b.angvel, k.b), rb);
-    return va - vb;
-}
 
 // Velocity-level dynamic friction for one contact. The normal impulse over
 // the substep is lambda_n / h plus the restitution impulse, so the friction
 // impulse is capped at mu times that. It accumulates across iterations, with the total kept
 // inside the friction cone.
 PHYS_HD void solve_contact_friction(const Params& p, const Buffers& b, Contact& k) {
-    if (k.lambda_n <= 0.0f) return;  // not touching this substep
+    if (k.lambda_n <= 0.0f || k.compliance > 0.0f) return;  // not touching / coupled pad
     V3 n = {k.n[0], k.n[1], k.n[2]};
     V3 pa, pb, ra, rb;
     contact_points(b, k, pa, pb, ra, rb);
@@ -938,7 +1161,7 @@ PHYS_HD void solve_contact_friction(const Params& p, const Buffers& b, Contact& 
 // velocity to -e times the approach speed. Slow contacts don't bounce, so
 // resting bodies settle.
 PHYS_HD void solve_contact_restitution(const Params& p, const Buffers& b, Contact& k) {
-    if (k.lambda_n <= 0.0f) return;
+    if (k.lambda_n <= 0.0f || k.compliance > 0.0f) return;  // coupled pads: damped in solve_pad_shear
     V3 n = {k.n[0], k.n[1], k.n[2]};
     V3 pa, pb, ra, rb;
     contact_points(b, k, pa, pb, ra, rb);
@@ -963,6 +1186,7 @@ PHYS_HD void rigid_solve_positions(const Params& p, const Buffers& b, int env) {
     }
     b.ncontact[env] = sink.count;
     int n = sink.count < p.max_contacts ? sink.count : p.max_contacts;
+    if (p.nsensor > 0) tag_pad_contacts(p, b, env, sink.out, n);
     // Joints and penetration are resolved first, over several symmetric
     // Gauss-Seidel sweeps (alternating direction, so the fixed order does not
     // bias resting bodies into creeping). Only then is static friction
@@ -974,10 +1198,12 @@ PHYS_HD void rigid_solve_positions(const Params& p, const Buffers& b, int env) {
     // sweep removes the joint error and penetration friction introduced.
     for (int j = 0; j < p.njoint; j++) b.joint_lambda[env * p.njoint + j] = 0.0f;
     for (int it = 0; it < p.position_iterations; it++) {
-        for (int j = 0; j < p.njoint; j++)
+        for (int j = 0; j < p.njoint; j++) {
             solve_joint_position(p, b, env, (it & 1) ? p.njoint - 1 - j : j);
-        for (int k = 0; k < n; k++)
+        }
+        for (int k = 0; k < n; k++) {
             solve_contact_position(p, b, sink.out[(it & 1) ? n - 1 - k : k]);
+        }
     }
     for (int k = 0; k < n; k++) solve_contact_static_friction(p, b, sink.out[k]);
     for (int j = p.njoint - 1; j >= 0; j--) solve_joint_position(p, b, env, j);
@@ -993,6 +1219,7 @@ PHYS_HD void rigid_solve_positions(const Params& p, const Buffers& b, int env) {
 PHYS_HD void rigid_solve_velocities(const Params& p, const Buffers& b, int env) {
     Contact* contacts = b.contacts + (size_t)env * p.max_contacts;
     int n = b.ncontact[env] < p.max_contacts ? b.ncontact[env] : p.max_contacts;
+    if (p.nsensor > 0) solve_pad_shear(p, b, env);
     for (int j = 0; j < p.njoint; j++) solve_joint_velocity(p, b, env, j);
     for (int it = 0; it < p.velocity_iterations; it++)
         for (int k = 0; k < n; k++)

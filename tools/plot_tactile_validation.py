@@ -24,16 +24,19 @@ def run(loads, shears, device, average_steps=0):
     m.add_body(lp.Body.none(0.5, (1e-3, 1e-3, 1e-3)))
     box = m.add_body(lp.Body.box((0.02, 0.02, 0.005), 0.1), friction=MU, restitution=0.0)
     m.add_body(lp.Body.sphere(R, 0.0), friction=MU, restitution=0.0)
-    m.add_joint(lp.Joint.slider(-1, 0, (0, 0, 0.015), (0, 0, 0), (0, 0, 1)), actuator="torque", damping=20.0)
-    m.add_joint(lp.Joint.slider(0, box, (0, 0, 0), (0, 0, 0), (1, 0, 0)), actuator="torque", damping=20.0)
+    m.add_joint(lp.Joint.slider(-1, 0, (0, 0, 0.015), (0, 0, 0), (0, 0, 1)), actuator="torque", damping=2.0)
+    m.add_joint(lp.Joint.slider(0, box, (0, 0, 0), (0, 0, 0), (1, 0, 0)), actuator="torque", damping=2.0)
     m.add_tactile_sensor(box, origin=(0, 0, -0.005), frame=(0, 1, 0, 0), width=PAD, height=PAD,
                          resolution=(CELLS, CELLS), youngs_modulus=E, poisson=NU)
     w = lp.World(m, num_envs=len(loads), device=device)
     w.state.pz[:, :2] = 0.015
     w.ctrl[:, 0] = -torch.tensor(loads, device=w.ctrl.device)
+    w.step(1 / 240, 60)  # press first, then shear
     w.ctrl[:, 1] = torch.tensor(shears, device=w.ctrl.device)
     w.step(1 / 240, 240)
     w.synchronize()
+    run.pad_x = w.state.px[:, 1].cpu().numpy()  # the pad's shear displacement
+    run.pad_z = w.state.pz[:, 1].cpu().numpy()
     reading = w.tactile[0].cpu().numpy(), w.tactile_force[:, 0].cpu().numpy()
     if not average_steps:
         return reading
@@ -57,7 +60,7 @@ def main():
     e_star = E / (1 - NU ** 2)
     cell = PAD / CELLS
     xs = (np.arange(CELLS) + 0.5) * cell - PAD / 2
-    fig, ax = plt.subplots(1, 3, figsize=(12, 3.6))
+    fig, ax = plt.subplots(1, 4, figsize=(16, 3.6))
 
     # (a) Hertz pressure profiles.
     loads = [0.5, 1.0, 2.0]
@@ -98,6 +101,18 @@ def main():
     ax[2].errorbar(loads, mean, yerr=std, fmt="o", ms=5, capsize=3, label="pad force: mean, step-to-step scatter")
     ax[2].set(xlabel="applied load (N)", ylabel="reported (N)", title="Load balance (sum p A = pad force)")
     ax[2].legend(frameon=False, fontsize=8)
+    # (d) Two-way coupling: the pad's own shear displacement vs Mindlin.
+    fr = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    t, f = run([1.0] * len(fr), list(fr * MU), args.device)
+    W = f[:, 2]
+    a = (3 * W * R / (4 * e_star)) ** (1 / 3)
+    ratio = (2 - NU) / (2 * (1 - NU))
+    ustar = 1.5 * MU * W / (2 * e_star * a / ratio)
+    g = np.linspace(0, 0.999, 200)
+    ax[3].plot(g, (1 - (1 - g) ** (2 / 3)), "k", lw=1.5, label="Mindlin  u / u* = 1 - (1 - Q / mu W)^(2/3)")
+    ax[3].plot(np.abs(f[:, 0]) / (MU * W), run.pad_x / ustar, "o", ms=5, label="simulated pad (coupled)")
+    ax[3].set(xlabel="Q / mu W", ylabel="pad displacement / u*", title="Gel shear in the dynamics vs Mindlin")
+    ax[3].legend(frameon=False, fontsize=8)
     for a_ in ax:
         a_.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()

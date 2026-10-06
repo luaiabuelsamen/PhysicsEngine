@@ -199,6 +199,9 @@ public:
             alloc(&b_.tactile_touch, (size_t)p_.nenv * p_.nsensor * kTactileMaxTouching * sizeof(int));
             PHYS_CUDA(cudaMemset(b_.tactile_accum, 0, (size_t)p_.nenv * p_.nsensor * kTactileAccum * sizeof(float)));
             PHYS_CUDA(cudaMemset(b_.tactile_touch, 0xff, (size_t)p_.nenv * p_.nsensor * kTactileMaxTouching * sizeof(int)));
+            size_t cb = (size_t)p_.nenv * p_.nsensor * kPadState * sizeof(float);
+            alloc(&b_.tactile_coupling, cb);
+            PHYS_CUDA(cudaMemset(b_.tactile_coupling, 0, cb));
         } else {
             for (int a = 0; a < 3; a++) {
                 alloc(&b_.dpos[a], fb);
@@ -228,17 +231,18 @@ public:
 
     void step(float dt, int nsteps) override {
         set_step_length(p_, dt);
+        int ns = p_.nenv * p_.nsensor;
         for (int step = 0; step < nsteps; step++) {
-            if (p_.rigid)
+            if (p_.rigid) {
                 rigid_step();
-            else
+                // Every step: coupled pads take their stiffness from it.
+                if (ns > 0) tactile_kernel<<<ns, p_.tactile_threads, tactile_shared_bytes(p_)>>>(p_, b_);
+            } else {
                 particle_step();
+            }
         }
         int nj = p_.nenv * p_.njoint;
         if (p_.rigid && nj > 0) rigid_observe_kernel<<<blocks_for(nj), kThreads>>>(p_, b_, nj);
-        int ns = p_.nenv * p_.nsensor;
-        if (p_.rigid && ns > 0)
-            tactile_kernel<<<ns, p_.tactile_threads, tactile_shared_bytes(p_)>>>(p_, b_);
         PHYS_CUDA(cudaGetLastError());
     }
 

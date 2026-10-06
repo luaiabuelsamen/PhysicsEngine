@@ -50,57 +50,93 @@ Checked against exact solutions (`tests/test_tactile.cpp`):
 
 ## Tactile sensors in World
 
-`src/phys/tactile_sensor.h`, `phys::TactileSensorDesc` / `Model.add_tactile_sensor`:
-the same half-space gel, as pads on rigid bodies, solved for every env on
-the GPU.
+`src/phys/tactile_sensor.h` (the contact solve) and the "tactile pads"
+section of `src/phys/rigid.h` (the coupling); configured through
+`phys::TactileSensorDesc` / `Model.add_tactile_sensor`. These are the same
+half-space gel as the standalone patch, as pads on rigid bodies, solved for
+every env on the GPU after every step.
 
-The coupling is one-way and load-controlled:
+**Two-way coupling** (`coupled = true`, the default). Contacts on a pad's
+face take the gel's compliance inside the rigid solve:
 
-1. **The rigid solver sets the load.** The force on a pad is the contact
-   force on its face, averaged over the step's substeps: the position
-   solve's multipliers, the velocity solve's restitution impulses and
-   friction. A single substep's contact force can alternate between zero and
-   twice the mean as Gauss-Seidel settles a resting contact; the substep
-   average is steady.
-2. **The touching bodies give the gap field.** Rays are cast along the pad
-   normal from every cell against the shapes of the bodies touching the pad.
-3. **The sensor solves the contact problem for that load.** It finds P >= 0
-   with sum P = W such that the deformed gap h + K P is equal to the
-   approach over the contact and no smaller elsewhere (Polonsky & Keer 1999,
-   conjugate gradient). The solve is warm-started from the last step and
-   converges in 5-15 iterations.
+- **Normal.** A pad contact is a compliant XPBD constraint. Its stiffness is
+  the gel's secant stiffness W / delta from the previous step's tactile
+  solve (delta: the deflection under the deepest point), shared among the
+  pad's contacts. Before the first solve it is the stiffness of a circular
+  contact a quarter of the pad wide. An object therefore sinks into the pad
+  as far as the gel model says, at most half the gel's `thickness` (a
+  sharp corner is a point load on a linear half-space, which would sink
+  without limit; a real gel bottoms out on its backing). Restitution is
+  replaced by critical damping
+  of the gel's normal motion, which never makes the contact pull.
+- **Tangential.** Rigid static and dynamic friction are replaced by a
+  persistent shear deflection u of the gel, driven by the object's motion
+  relative to the pad. Its force follows Mindlin's law
+  Q = mu W (1 - (1 - |u| / u*)^(3/2)), with u* = 3 mu W / (2 k_t). Here
+  k_t = 2 E* sqrt(A / pi) / tangential_ratio is the initial tangential
+  stiffness of a contact of area A, taken from the last tactile solve. The
+  deflection is critically damped while the contact sticks; beyond u* the
+  pad slides at mu W.
+- **Coverage.** The gel is taken to cover the face around the pad: contacts
+  up to one pad size outside it are coupled too. Otherwise an indented
+  contact sliding off the sensing area would turn rigid and be ejected.
+
+The tactile solve then works as follows:
+
+1. **The pad's load** is the contact force on its face, averaged over the
+   step's substeps, including the gel's shear.
+2. **The gap field** comes from rays cast along the pad normal, from every
+   cell, against the shapes of the bodies touching the pad.
+3. **Pressure.** The solve finds P >= 0 with sum P = W such that the deformed
+   gap h + K P equals the approach over the contact and is no smaller
+   elsewhere (Polonsky & Keer 1999, conjugate gradient). It is warm-started
+   from the last step and converges in a few iterations once contacts are
+   steady.
 4. **Shear: q = mu (P - P*) Q / |Q|.** P* solves the same problem at the
-   reduced load W - |Q| / mu (Ciavarella 1998; Jaeger 1998). The cells
-   where P* > 0 stick. This is exact for a monotonically applied shear here,
-   because the normal and the angle-averaged tangential kernels are
-   proportional. Within 2% of the friction cone the whole contact slides,
-   which covers the scatter of the rigid solver's sliding friction.
+   reduced load W - |Q| / mu (Ciavarella 1998; Jaeger 1998). Cells where
+   P* > 0 stick. This is exact for monotonic shear here, because the normal
+   and the angle-averaged tangential kernels are proportional; it is the
+   same Mindlin theory the coupling uses. Within 2% of the friction cone the
+   whole contact slides.
 
 Checked in `tests/test_tactile_sensor.cpp`. A pad on a box is pressed onto a
-fixed sphere by slider forces:
+fixed sphere by slider forces, then sheared:
 
 | Check | Result |
 |---|---|
-| Pad force vs applied load (0.5, 1, 2 N) | 0.01-0.02% |
-| Hertz contact radius / peak pressure / indentation at 1 N | 0.5% / 1% / 0.6% |
+| Pad force vs applied load (0.5, 1, 2 N) | 0.02% |
+| Hertz contact radius / peak pressure at 1 N | 0.5% / 1% |
+| The pad body's indentation into the sphere vs Hertz (1, 2 N) | 0.6%, 0.0% |
+| The pad's shear displacement vs Mindlin, Q / mu W = 0.3, 0.6 | < 0.5% |
 | Mindlin stick radius at Q / mu W = 0.3, 0.6, 0.8 | within one cell (0.375 mm) |
 | Full slip: every cell slides, abs(q) proportional to p, Q = mu W | exact |
+| Step-to-step scatter of the pad force at 10 substeps, under shear | < 1e-5 N |
 | Flat pad on a floor: load, full contact, edge pressure rise | 0.01%; 400 / 400 cells; 3.9x the centre |
 | CPU vs CUDA | bit-identical |
 
-Building this exposed a rigid-solver bug, now fixed. Dynamic friction was
-capped by mu times the position solve's normal impulse alone. When the
-restitution solve removes part of that impulse (it does, for contacts pushed
-through joints), sliding friction exceeded mu times the true normal force,
-by 20% in the test rig. It is now capped by the net normal impulse.
+**Rigid-solver bugs found on the way, now fixed.**
 
-Not modelled yet:
+- **Sliding friction exceeded the cone.** Dynamic friction was capped by
+  mu times the position solve's normal impulse alone. When restitution
+  removed part of that impulse (as it does for contacts pushed through
+  joints), sliding friction exceeded mu times the true normal force, by 20%
+  in the test rig. It is now capped by the net normal impulse.
+- **Sliders pushed along their own axis.** A slider's lateral correction was
+  computed as delta - ex (ex . delta) with a float axis that is unit only to
+  about 1e-7. That left an axial push of about 1e-7 times the slider's
+  travel, repeated every iteration of every substep. It biased force
+  balances along slider axes by up to 5x, for a 5 kg carriage at 8
+  iterations. The axial part is now removed exactly, in the joint frame.
 
-- The gel's compliance does not feed back into the rigid contact. The
-  stick-to-slip transition takes a step instead of the ~1 mm of slide in
-  finding 2.
-- Shear hysteresis under reversed loading.
+**Not modelled yet.**
+
+- Shear hysteresis: partial-slip unloading follows the loading curve back
+  (no Masing rule).
+- A pad's single rigid shift is shared by everything touching it; separate
+  objects on one pad shear together.
 - Pads larger than about 32 x 32 cells are slow (dense influence sums).
+- Float32 positions round the solver's corrections, leaving about 0.03%
+  in the force balances.
 
 ## Findings so far
 
@@ -236,9 +272,8 @@ python3 tools/sparsh_contact_area.py --batch 1
   photometric model of the sensor, or with depth reconstructions.
 - Shear at the gel itself: stick / slip regions from marker displacement
   fields on marker-based gels.
-- Two-way coupling: let the pad's gel compliance (normal and tangential)
-  set the rigid contact's compliance, so that indentation and the
-  stick-to-slip transition come out of the dynamics.
+- Compare the coupled stick-to-slip transition with real slide data, once
+  the rig compliance is separated out (finding 3).
 - All fits push the probe radius to the top of its range (30 mm): the probe
   geometry is unknown, and the data may also reflect gel thickness effects
   that a half-space ignores.
