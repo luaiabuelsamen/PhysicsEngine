@@ -1,0 +1,12 @@
+/usr/bin/ld: rglfw.c:(.text+0x9ae8): undefined reference to `__isoc23_strtoul'
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rmodels.o): in function `cgltf_json_to_int':
+rmodels.c:(.text+0x2d98): undefined reference to `__isoc23_strtol'
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rmodels.o): in function `cgltf_parse_json_attribute_list':
+rmodels.c:(.text+0x4678): undefined reference to `__isoc23_strtol'
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rmodels.o): in function `cgltf_json_to_size':
+rmodels.c:(.text+0x5564): undefined reference to `__isoc23_strtoll'
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rmodels.o): in function `tinyobj_parse_and_index_mtl_file':
+rmodels.c:(.text+0xb05c): undefined reference to `__isoc23_sscanf'
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rmodels.o): in function `par_shapes_create_lsystem':
+rmodels.c:(.text+0x1f33c): undefined reference to `__isoc23_strtol'
+clang: error: linker command failed with exit code 1 (use -v to see invocation)

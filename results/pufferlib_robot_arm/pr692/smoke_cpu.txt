@@ -1,0 +1,11 @@
+# PR #692 (640eeb0) CPU smoke on Jetson Orin NX, --cpu binaries, headless eval, single process.
+# Built with #692's build.sh and raylib 6.0 compiled from source on the host (the prebuilt
+# raylib-6.0_linux_arm64 archive does not link against glibc 2.35, see *_native.log / *_cpu.log).
+# steps/s = steps / wall time including process start; untrained runs are too short to time.
+# Trained checkpoints: trained on this Orin with PufferLib 5.0 6ffa5b1 (results/pufferlib_spike/summary.json).
+cartpole_untrained | untrained=1 n=2000 perf=0.022035 score=5.407000 steps=10814 agents=1 | wall 0.01 s
+cartpole_trained   | untrained=0 n=2000 perf=0.994981 score=199.996994 steps=399994 agents=1 | wall 2.19 s | 182359 steps/s
+breakout_untrained | untrained=1 n=200 perf=0.000000 score=0.000000 steps=92400 agents=1 | wall 0.02 s
+breakout_trained   | untrained=0 n=20 perf=0.941030 score=813.049988 steps=432644 agents=1 | wall 2.07 s | 208886 steps/s
+impulse_wars_untrained | untrained=1 n=20 perf=0.000000 score=0.000000 steps=6137 agents=1 | wall 0.20 s
+nmmo3_untrained    | untrained=1 n=5 perf=0.025000 score=1.000000 steps=2 agents=1024

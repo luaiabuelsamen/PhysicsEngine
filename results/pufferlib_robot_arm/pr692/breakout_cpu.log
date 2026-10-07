@@ -1,0 +1,12 @@
+rtext.c:(.text+0x83f0): undefined reference to `__isoc23_sscanf'
+/usr/bin/ld: rtext.c:(.text+0x8468): undefined reference to `__isoc23_sscanf'
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rtext.o):rtext.c:(.text+0x84c8): more undefined references to `__isoc23_sscanf' follow
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rglfw.o): in function `_glfwParseUriList':
+rglfw.c:(.text+0x576c): undefined reference to `__isoc23_strtol'
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rglfw.o): in function `_glfwRefreshContextAttribs':
+rglfw.c:(.text+0x65c0): undefined reference to `__isoc23_sscanf'
+/usr/bin/ld: raylib-6.0_linux_arm64/lib/libraylib.a(rglfw.o): in function `parseMapping':
+rglfw.c:(.text+0x999c): undefined reference to `__isoc23_strtoul'
+/usr/bin/ld: rglfw.c:(.text+0x99b4): undefined reference to `__isoc23_strtoul'
+/usr/bin/ld: rglfw.c:(.text+0x9ae8): undefined reference to `__isoc23_strtoul'
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
