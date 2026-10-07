@@ -20,10 +20,12 @@ from grasp_env import BALL_FRICTION, EPISODE, FINGER_FRICTION, MASSES, GraspEnv,
 from train_grasp import ActorCritic, RunningNorm
 from libphys import viz
 
-KINDS = ("proprio", "force", "markers", "tactile")
-LABELS = {"proprio": "proprioception", "force": "+ pad forces", "markers": "+ pad forces + gel images (no stick map)",
+KINDS = ("proprio", "force", "depth", "shear", "markers", "tactile")
+LABELS = {"proprio": "proprioception", "force": "+ pad forces", "markers": "+ pad forces + deflection & displacement images",
+          "depth": "+ pad forces + deflection images", "shear": "+ pad forces + displacement images",
           "tactile": "+ pad forces + stick fraction"}
-COLORS = {"proprio": "tab:blue", "force": "tab:orange", "markers": "tab:purple", "tactile": "tab:green"}
+COLORS = {"proprio": "tab:blue", "force": "tab:orange", "markers": "tab:purple", "tactile": "tab:green",
+          "depth": "tab:brown", "shear": "tab:pink"}
 
 
 def find_runs(roots):
