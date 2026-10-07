@@ -7,4 +7,4 @@ Blocked: (1) Blocked: needs Luai approval to push the upstream PR branch fix/rob
 Pushed (2026-10-06, plain git push to origin/main, approved by Luai): 7eb169e..18ecff7 = 2ba94e3, c8beb04, 8657481, a81657f, 3aba6b4, 18ecff7 (README claim + hero GIF + headline 67% vs 36% from results/grasp/eval.json + figure; DECISION.md; VALIDATION.md; results/).
 Paid compute: none launched from this repo (all work so far ran on the Jetson). No Modal or cloud jobs without an approved budget; V2 (TacSL on an x86 RTX GPU) would need one and is not requested while the STOP recommendation stands.
 Next: when the GPU is free: seeds 1 and 2, same command (docs/PUFFERLIB_ROBOT_ARM.md, Reproduce), then rerun tools/puffer_robot_arm_results.py with all 3 logs and evaluate criterion (2). Seeds 1 and 2 PENDING, not started.
-Updated: 2026-10-07 05:15
+Updated: 2026-10-07 04:34
