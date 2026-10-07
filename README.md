@@ -8,11 +8,17 @@ body report what a gel fingertip would feel:
 - the gel's deformation;
 - where the contact sticks or slips.
 
-The pads solve real contact mechanics rather than penalty springs, and
-the gel acts back on the dynamics: objects indent it as far as the gel
-model says, and grip turns into slip gradually, as Mindlin's theory
-predicts. Every result is checked against exact solutions, MuJoCo, or real
-GelSight / DIGIT data.
+The pads solve an elastic contact problem rather than using penalty
+springs, and the gel acts back on the dynamics: objects indent it as far as
+the gel model says, and grip turns into slip gradually, as Mindlin's theory
+predicts.
+
+**Scope.** The rigid solver is checked against exact solutions and MuJoCo
+reference trajectories, and the tactile model against closed-form contact
+mechanics (Hertz, Mindlin). **Neither is validated against measured sensor
+or robot data yet.** The gel is an idealised linear elastic half-space;
+whether it matches real GelSight / DIGIT gels is open (see "Real sensors"
+below). All RL results are in simulation.
 
 ![A gel fingertip pressed onto and dragged across three objects](docs/media/tactile_demo.gif)
 
@@ -166,18 +172,22 @@ contact mechanics (`tools/plot_tactile_validation.py`;
 `libphys.viz.gelsight(reading, cell)` and `viz.tactile_map(reading)` turn a
 reading into the images above.
 
-**Toward real sensors.** `tools/` fits contact laws to Meta's Sparsh datasets
-(~2,800 GelSight Mini and DIGIT trajectories with forces). So far:
-- **Pressing:** the gels follow elastic half-space laws, not Winkler /
-  hydroelastic ones.
+**Real sensors: not validated.** `tools/` contains an exploratory analysis
+of Meta's Sparsh datasets (~2,800 GelSight Mini and DIGIT press-and-slide
+trajectories with forces). It fits contact laws to the data; it does not
+compare simulator output with measurements. Findings so far:
+- **Pressing:** fitted force-depth exponents (DIGIT 1.58, GelSight 1.36)
+  are closer to an elastic half-space (1.5) than to Winkler / hydroelastic
+  springs (2). The GelSight value is below what any linear elastic gel
+  model gives, most likely because of rig compliance.
 - **Shear from force traces:** dominated by test-rig compliance, so the
-  traces can't tell the contact models apart.
-- **Contact radius from images:** lies between the two models, an open
-  question.
+  traces cannot tell the contact models apart.
+- **Contact radius from images:** grows with load between the two models'
+  predictions, which the simulator's model does not reproduce.
 
-The analysis is in [docs/TACTILE.md](docs/TACTILE.md).
+Details: [docs/TACTILE.md](docs/TACTILE.md).
 
-## RL with touch: fragile grasping
+## RL with touch: fragile grasping (simulation)
 
 ![Learned tactile grasping](docs/media/grasp_tactile.gif)
 
@@ -375,7 +385,7 @@ tests/         C++ tests
 benchmarks/    bench_envs (batched RL envs), benchmark (particle solver vs CPU baselines)
 tools/         validation figures, MuJoCo reference check, Sparsh tactile data analysis
 extern/        MotionPlanning (submodule)
-docs/          TACTILE.md (tactile model and real-data findings), media
+docs/          TACTILE.md (tactile model, Sparsh data analysis), VALIDATION.md, DECISION.md, media
 legacy/        earlier experiments, not built
 ```
 

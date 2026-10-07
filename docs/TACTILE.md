@@ -119,20 +119,6 @@ fixed sphere by slider forces, then sheared:
 | Flat pad on a floor: load, full contact, edge pressure rise | 0.01%; 400 / 400 cells; 3.9x the centre |
 | CPU vs CUDA | bit-identical |
 
-**Rigid-solver bugs found on the way, now fixed.**
-
-- **Sliding friction exceeded the cone.** Dynamic friction was capped by
-  mu times the position solve's normal impulse alone. When restitution
-  removed part of that impulse (as it does for contacts pushed through
-  joints), sliding friction exceeded mu times the true normal force, by 20%
-  in the test rig. It is now capped by the net normal impulse.
-- **Sliders pushed along their own axis.** A slider's lateral correction was
-  computed as delta - ex (ex . delta) with a float axis that is unit only to
-  about 1e-7. That left an axial push of about 1e-7 times the slider's
-  travel, repeated every iteration of every substep. It biased force
-  balances along slider axes by up to 5x, for a 5 kg carriage at 8
-  iterations. The axial part is now removed exactly, in the joint frame.
-
 **Not modelled yet.**
 
 - Shear hysteresis: partial-slip unloading follows the loading curve back
