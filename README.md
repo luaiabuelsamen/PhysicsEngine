@@ -105,7 +105,7 @@ More in `examples/`:
 |---|---|
 | `tactile_demo.py` | The GIF above: a fingertip pressed and dragged across three objects |
 | `tactile_gallery.py` | Simulated sensor images of five objects under a rising load |
-| `grasp_env.py`, `train_grasp.py`, `eval_grasp.py` | Fragile grasping: an RL task where touch matters, PPO, evaluation |
+| `grasp_env.py`, `train_grasp.py`, `eval_grasp.py`, `probe_grasp.py` | Fragile grasping: an RL task where touch matters; PPO; evaluation; what a policy uses |
 | `ur5e_planner.py` / `.cpp` | Plan MoveL / MoveJ for a UR5e per env, track the plans under gravity |
 | `cartpole.py` | Vectorized CartPole from Python |
 | `rigid_pile.cpp`, `particle_pour.cpp`, `particle_bounce.cpp` | Rigid and particle solver demos (write GIFs via ffmpeg) |
@@ -181,7 +181,8 @@ The analysis is in [docs/TACTILE.md](docs/TACTILE.md).
 
 ![Learned tactile grasping](docs/media/grasp_tactile.gif)
 
-*A policy that sees the gel images (no stick map), on four hidden balls.
+*A policy that sees the gel deflection and displacement images, on four
+hidden balls.
 Below each: the simulated sensor image, pressure with shear, and the grip
 force against the least force that holds the ball (dashed) and the break
 limit (red). The lightest, grippiest ball breaks.*
@@ -195,7 +196,7 @@ limit (red). The lightest, grippiest ball breaks.*
   too little and it slips out; too much and it breaks.
 - **Control.** The lift is scripted; the policy adjusts the grip force.
 
-PPO (`examples/train_grasp.py`) is trained with four observation sets,
+PPO (`examples/train_grasp.py`) is trained with six observation sets,
 3 seeds each, 18M env steps per run (about 11 minutes per run on the Orin
 when trained alone). The
 results below are from 4,096 held-out episodes per policy
@@ -206,28 +207,47 @@ results below are from 4,096 held-out episodes per policy
 | (fixed grip, best: 2 N) | 28% | 32% | 41% |
 | finger positions and velocities, grip, time | 23% (0-37%) | 24% | 54% |
 | + each pad's normal and shear force | 36% (36-36%) | 28% | 36% |
-| **+ each pad's gel deflection and displacement images** (12 x 12, no stick map) | **67% (65-68%)** | 33% | **0%** |
-| + each pad's stick fraction (a scalar instead of the images) | 59% (25-75%) | 19% | 22% |
+| + each pad's gel deflection image (a sensor without markers) | 36% (35-38%) | 64% | 0% |
+| **+ each pad's gel displacement images (markers)** | **64% (62-67%)** | 36% | **0%** |
+| + deflection and displacement images | 67% (65-68%) | 33% | 0% |
+| + each pad's stick fraction (a scalar instead of images) | 59% (25-75%) | 19% | 22% |
 | (oracle that knows mass and friction) | 100% | 0% | 0% |
+
+Images are 12 x 12 per pad, with no stick map.
 
 ![Learning curves](docs/media/grasp_learning.png)
 
-**Why touch helps.**
+**Why touch helps, and which touch.**
 - **Forces are not enough.** Pad forces give the ball's weight but not its
   friction, and stop at 36%.
-- **The images are enough.** The images are what a vision-based sensor with
-  markers provides: the gel's deflection and its sideways displacement.
+- **The marker displacement field is the useful signal.** That is the gel's
+  sideways displacement, which a vision-based sensor shows through markers
+  printed on the gel.
   - As the grip nears slip, the outer ring of the contact starts slipping
-    while the centre still sticks (Mindlin partial slip). That changes the
-    shape of the displacement field, which is presumably what the policy
-    reads (which features it uses has not been analysed).
-  - From those images alone, the policy learns a grip reflex: it tightens
-    just enough as the load comes on. It never drops a ball, on every seed.
+    while the centre still sticks (Mindlin partial slip), and that changes
+    the displacement field.
+  - From displacement images alone, the policy learns a grip reflex: it
+    tightens just enough as the load comes on, and never drops a ball on any
+    seed.
+- **The deflection image (depth map) is not enough on its own.** It is all a
+  sensor without markers sees. Here it changes with the load but not with
+  the shear: for an incompressible gel, normal and tangential responses
+  decouple. So it does no better than force readings: it avoids drops by
+  squeezing hard, and breaks balls instead.
 - **The stick fraction is a less reliable shortcut.** Handed the share of
   the contact that still sticks as a single number, PPO reaches 75% on two
   seeds but stalls at 25% on the third.
 - **Remaining failures** are breaks of the lightest, grippiest balls, for
   which even the 0.4 N starting grip is over the limit.
+- **What the full-image policy uses** (`examples/probe_grasp.py`, holding
+  one input group at its training mean):
+  - Without the deflection images it falls from 67% to 7%: this policy reads
+    the load from the depth map and ignores the force readings. A policy
+    trained without depth maps reads the load from the forces instead (the
+    displacement-only row).
+  - Without the displacement along the lift it falls to 19%.
+  - The pad force readings and the displacement across the lift make no
+    difference.
 
 A contact model with a single friction state per contact, such as rigid
 Coulomb friction, cannot produce this signal; it needs a model of partial

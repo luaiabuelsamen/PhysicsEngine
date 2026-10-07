@@ -122,7 +122,7 @@ def save(args, net, norm, log):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--obs", default="tactile", choices=["proprio", "force", "tactile", "markers"])
+    ap.add_argument("--obs", default="tactile", choices=["proprio", "force", "tactile", "markers", "depth", "shear"])
     ap.add_argument("--envs", type=int, default=2048)
     ap.add_argument("--updates", type=int, default=120)
     ap.add_argument("--lr", type=float, default=3e-4)
