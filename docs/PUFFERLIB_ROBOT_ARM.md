@@ -38,7 +38,10 @@ The patch:
 
 It is on branch `fix/robot-arm-aarch64-build` (commit `6901c83`) in
 `~/projects/PufferLib-jetson`, with a PR description in `PR_DESCRIPTION.md`
-there. It has not been pushed.
+there. It has not been pushed, and it will not be opened as a PR: it
+duplicates upstream #692 (arm64 builds) and #695 (removes the obs_t
+check). Test results for #692 on this board and draft comments are in
+`results/pufferlib_robot_arm/UPSTREAM_COMMENTS.md`.
 
 ## Training (seed 42)
 
