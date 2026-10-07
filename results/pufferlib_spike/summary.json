@@ -1,0 +1,106 @@
+{
+ "pufferlib_5_0_commit": "6ffa5b1",
+ "pufferlib_4_0_commit": "42f70d69",
+ "machine": "Jetson Orin NX 16GB, aarch64, CUDA sm_87, MAXN, shared with other jobs during the runs",
+ "mean_sps_definition": "logged Steps / logged Uptime from the final dashboard frame",
+ "a_cpu_eval": {
+  "log": "logs/a_cartpole_eval_long.log",
+  "steps": 2163000,
+  "wall_s_incl_startup": 0.105,
+  "steps_per_s": 20600000,
+  "note": "random (untrained) policy, one core, env only"
+ },
+ "training_runs": [
+  {
+   "test": "c: 5.0 CUDA trainer, cartpole (CPU env)",
+   "seed": 73,
+   "log": "logs/c_train_cartpole_final.log",
+   "steps": 14900000.0,
+   "uptime_s": 7.792,
+   "mean_sps": 1912218,
+   "perf": 0.995,
+   "score": 199.999
+  },
+  {
+   "test": "c: 5.0 CUDA trainer, cartpole (CPU env)",
+   "seed": 1,
+   "log": "logs/c_train_cartpole_s1_final.log",
+   "steps": 14900000.0,
+   "uptime_s": 7.519,
+   "mean_sps": 1981646,
+   "perf": 0.995,
+   "score": 199.999
+  },
+  {
+   "test": "c: 5.0 CUDA trainer, cartpole (CPU env)",
+   "seed": 2,
+   "log": "logs/c_train_cartpole_s2_final.log",
+   "steps": 14900000.0,
+   "uptime_s": 7.013,
+   "mean_sps": 2124626,
+   "perf": 0.985,
+   "score": 198.035
+  },
+  {
+   "test": "c: 5.0 CUDA trainer, breakout (GPU env, --cu)",
+   "seed": 73,
+   "log": "logs/c_breakout_cu_s73_final.log",
+   "steps": 54900000.0,
+   "uptime_s": 43.294,
+   "mean_sps": 1268074,
+   "perf": 0.998,
+   "score": 862.488
+  },
+  {
+   "test": "c: 5.0 CUDA trainer, breakout (GPU env, --cu)",
+   "seed": 1,
+   "log": "logs/c_breakout_cu_s1_final.log",
+   "steps": 54900000.0,
+   "uptime_s": 58.801,
+   "mean_sps": 933658,
+   "perf": 0.983,
+   "score": 849.387
+  },
+  {
+   "test": "c: 5.0 CUDA trainer, breakout (GPU env, --cu)",
+   "seed": 2,
+   "log": "logs/c_breakout_cu_s2_final.log",
+   "steps": 54900000.0,
+   "uptime_s": 59.133,
+   "mean_sps": 928416,
+   "perf": 0.964,
+   "score": 833.033
+  },
+  {
+   "test": "b: 4.0 CPU trainer (--slowly), cartpole",
+   "seed": "unseeded repeat 1",
+   "log": "logs/b4_train_slowly_final.log",
+   "steps": 8400000.0,
+   "uptime_s": 308.0,
+   "mean_sps": 27273,
+   "perf": 0.862,
+   "score": 173.488
+  },
+  {
+   "test": "b: 4.0 CPU trainer (--slowly), cartpole",
+   "seed": "unseeded repeat 2",
+   "log": "logs/b4_train_slowly_s1_final.log",
+   "steps": 8400000.0,
+   "uptime_s": 193.0,
+   "mean_sps": 43523,
+   "perf": 0.992,
+   "score": 199.354
+  },
+  {
+   "test": "b: 4.0 CPU trainer (--slowly), cartpole",
+   "seed": "unseeded repeat 3",
+   "log": "logs/b4_train_slowly_s2_final.log",
+   "steps": 8400000.0,
+   "uptime_s": 189.0,
+   "mean_sps": 44444,
+   "perf": 0.987,
+   "score": 198.679
+  }
+ ],
+ "seed_note": "5.0 runs: default base.seed = 73, others --base.seed=1, 2. 4.0 --slowly runs: --seed parses to base.seed but nothing on the PyTorch CPU path reads it, so the three runs are unseeded repeats."
+}

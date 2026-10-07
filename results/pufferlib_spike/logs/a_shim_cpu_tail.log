@@ -1,0 +1,15 @@
+Compiling cartpole...
+src/puffercpu.c: In function ‘puf_find_latest_checkpoint.constprop’:
+src/puffercpu.c:670:38: warning: ‘%s’ directive output may be truncated writing between 4 and 4095 bytes into a region of size 1024 [-Wformat-truncation=]
+  670 |             snprintf(out, out_size, "%s", path);
+      |                                      ^~   ~~~~
+In file included from /usr/include/stdio.h:894,
+                 from src/puffercpu.c:1:
+/usr/include/aarch64-linux-gnu/bits/stdio2.h:71:10: note: ‘__builtin_snprintf’ output between 5 and 4096 bytes into a destination of size 1024
+   71 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   72 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   73 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+Built: ./cartpole

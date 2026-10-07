@@ -1,0 +1,50 @@
+{
+ "device": "Orin",
+ "episodes_per_repeat": 5,
+ "rows": [
+  {
+   "num_envs": 1024,
+   "obs": "force",
+   "obs_size": 10,
+   "control_steps_per_s": [
+    21481.154445541673,
+    24562.51724464829,
+    50093.08360286352
+   ],
+   "physics_steps_per_control_step": 2
+  },
+  {
+   "num_envs": 1024,
+   "obs": "markers",
+   "obs_size": 874,
+   "control_steps_per_s": [
+    50681.157935412084,
+    50646.27612017562,
+    43971.30669692707
+   ],
+   "physics_steps_per_control_step": 2
+  },
+  {
+   "num_envs": 4096,
+   "obs": "force",
+   "obs_size": 10,
+   "control_steps_per_s": [
+    13523.463718035135,
+    18300.283223006652,
+    19615.450494781624
+   ],
+   "physics_steps_per_control_step": 2
+  },
+  {
+   "num_envs": 4096,
+   "obs": "markers",
+   "obs_size": 874,
+   "control_steps_per_s": [
+    22346.019029648774,
+    16423.90387842481,
+    22189.319246133968
+   ],
+   "physics_steps_per_control_step": 2
+  }
+ ]
+}

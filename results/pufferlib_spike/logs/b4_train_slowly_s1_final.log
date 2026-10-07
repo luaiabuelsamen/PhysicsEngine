@@ -1,0 +1,23 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│  PufferLib 4.0     🐡             GPU: 0%      VRAM: 0.0/0G       RAM: 0.0G  │
+│                                                                              │
+│  Summary          Value    Evaluate   0d 0h  99%    Losses            Value  │
+│  Env           cartpole               0m 2s         policy_loss      -0.053  │
+│  Params            6.4K      GPU      0d 0h  96%    value_loss        0.026  │
+│  Steps             8.4M               0m 2s         entropy           0.443  │
+│  SPS              52.5K      Env       94ms   3%    old_approx_kl    -0.000  │
+│  Epoch               43    Train        0ms   0%    approx_kl         0.000  │
+│  Uptime    0d 0h 3m 13s      Misc       0ms   0%    clipfrac          0.000  │
+│  Remaini…            0s      Forwa…     0ms   0%    importance        1.000  │
+│                                                     explained_var…    0.113  │
+│                                                                              │
+│  User Stats                    Value    User Stats                    Value  │
+│  score                       199.354    perf                          0.992  │
+│  episode_length              199.354    x_threshold_terminati…        0.031  │
+│  pole_angle_termination        0.003    max_steps_termination         0.969  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+real	3m20.284s
+user	13m15.400s
+sys	2m39.930s

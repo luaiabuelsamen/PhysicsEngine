@@ -1,0 +1,19 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ PufferLib 5.0 🐡               GPU: 3532   VRAM:   4.5/15G    RAM:  0.4G     │
+│                                                                              │
+│ Env            cartpole    Evaluate      255ms  60%    Losses      29.014    │
+│ Params             6.4K      Model        82ms  19%    policy      -0.201    │
+│ Steps             14.9M      Env          46ms  11%    value       16.416    │
+│ SPS                2.8M      Copy         10ms   2%    entropy      0.175    │
+│ Epoch               114    Train         163ms  39%    old_kl       0.000    │
+│ Uptime         7s 013ms      Model       158ms  37%    kl           0.000    │
+│ To go               0ms      Misc          6ms   1%    clipfrac     0.000    │
+│                                                                              │
+│ score                       198.035   perf                          0.985    │
+│ episode_length              198.035   x_threshold_termination       0.014    │
+│ pole_angle_termination        0.121   max_steps_termination         0.871    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+real	0m8.726s
+user	0m20.248s
+sys	0m44.610s

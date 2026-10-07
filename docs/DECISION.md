@@ -142,6 +142,30 @@ flagship:
 - Tighten the step or contact settings until it is below c/4. If that is not
   affordable, state the margin next to every tight-tolerance number.
 
+### Engine sensitivity: cross-check before trusting a compliance result
+
+E1 shows that peg-in-hole outcomes depend on contact settings within one
+engine. An external matched-geometry comparison reports the same across
+engines. It is not reproduced here:
+[Manda thread](https://x.com/Mandarobotics/status/2107147301663785100).
+- MuJoCo (CPU) and Genesis complete the insertion, while PhysX hits its
+  controller overload limit.
+- Newton and Genesis are non-deterministic in crowded scenes.
+- With a stiff controller every engine ends near the same error (about
+  6 mm). With compliant gains they separate: 16-28 mm in some engines,
+  under 1 mm in others.
+
+E1 drove a free peg with a body load and no controller, so it does not test
+this. For the flagship:
+- **Treat compliance-based insertion results as engine-sensitive.**
+  Before reporting one, run the same task in a second engine (MuJoCo
+  near-rigid plus at least one of Genesis or PhysX), or confirm it on
+  hardware.
+- **Run stiff vs compliant controller gains in each engine as an
+  ablation.** Report the error per engine and gain setting next to the
+  headline result. Then a difference that only one engine shows is
+  visible as such.
+
 ## Revisit conditions
 
 - **Tactile sensing.** Reconsider libphys only if the flagship adds a

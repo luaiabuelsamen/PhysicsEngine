@@ -1,0 +1,6 @@
+Compiling ocean/breakout/breakout.cu -> puffer_breakout...
+Built: ./puffer_breakout
+
+real	0m20.376s
+user	0m12.803s
+sys	0m1.259s

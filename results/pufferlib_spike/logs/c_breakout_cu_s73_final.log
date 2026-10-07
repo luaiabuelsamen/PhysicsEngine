@@ -1,0 +1,18 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ PufferLib 5.0           🐡     GPU: 2417   VRAM:   7.6/15G    RAM:  0.4G     │
+│                                                                              │
+│ Env            breakout    Evaluate      658ms  51%    Losses       0.093    │
+│ Params            16.2K      Model         0ms   0%    policy       0.002    │
+│ Steps             54.9M      Env           0ms   0%    value        0.027    │
+│ SPS              952.9K      Copy          0ms   0%    entropy      0.634    │
+│ Epoch               419    Train         624ms  48%    old_kl       0.000    │
+│ Uptime        43s 294ms      Model       598ms  46%    kl           0.000    │
+│ To go               0ms      Misc         25ms   1%    clipfrac     0.000    │
+│                                                                              │
+│ perf                          0.998   score                       862.488    │
+│ episode_return              862.488   episode_length            16121.564    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+real	1m5.305s
+user	0m0.464s
+sys	0m0.963s

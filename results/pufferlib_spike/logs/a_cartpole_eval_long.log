@@ -1,0 +1,6 @@
+CPU_META env=cartpole path=- file_floats=0 need=6368 untrained=1 hidden=32 layers=2
+CPU_EVAL env=cartpole file_floats=0 need=6368 match=0 untrained=1 n=400000 perf=0.022013 score=5.407500 steps=2163000 agents=1
+
+real	0m0.105s
+user	0m0.102s
+sys	0m0.003s
