@@ -369,6 +369,11 @@ Every number is a test or tool in this repo.
 - **Damped joints.** Position-based joints are damped at first order in the
   substep length: a 1.5 rad pendulum loses 9% of its energy in 10 s at 40
   substeps.
+- **Rigid box-box contact at edges is unreliable.** In a matched peg-in-hole
+  sweep, libphys topples pegs at the hole rim that a near-rigid MuJoCo
+  reference inserts, at every tilt tested. It is not suitable for
+  insertion contact: see [docs/DECISION.md](docs/DECISION.md) and
+  `results/peg_hole/`.
 - **Not yet supported:**
   - mesh collision;
   - torsional or rolling friction;

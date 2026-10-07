@@ -1,0 +1,30 @@
+Press phase: normalised RMS error of each law (median, p90)
+  digit_sphere_batch_*.pkl: 324 trajectories, free exponent median 1.58 (IQR 1.45-1.64)
+     winkler n=2   1.33%   2.35%
+     hertz n=1.5   0.66%   1.22%
+     free n        0.47%   0.86%
+  gelsight_sphere_batch_*.pkl: 718 trajectories, free exponent median 1.36 (IQR 1.29-1.42)
+     winkler n=2   2.31%   3.23%
+     hertz n=1.5   1.25%   2.32%
+     free n        1.02%   1.85%
+  digit_sharp_batch_*.pkl: 307 trajectories, free exponent median 1.40 (IQR 1.30-1.49)
+     winkler n=2   1.99%   2.94%
+     hertz n=1.5   0.68%   1.73%
+     free n        0.49%   0.85%
+  gelsight_flat_batch_*.pkl: 197 trajectories, free exponent median 0.82 (IQR 0.67-0.89)
+     winkler n=2   7.17%  12.41%
+     hertz n=1.5   6.18%  11.76%
+     free n        3.86%   8.90%
+Slide phase (DIGIT, 60 fps): stick-to-slip transition shape (median, p90 error)
+  digit_sphere_batch_*.pkl: 308 slides, free m median 1.55 (IQR 1.34-1.73), full slip after u* = 0.81 mm
+     brush/winkler m=2       2.16%   4.37%
+     cattaneo-mindlin m=1.5  1.97%   4.20%
+     free m                  1.85%   4.12%
+  digit_sharp_batch_*.pkl: 303 slides, free m median 1.30 (IQR 1.23-1.36), full slip after u* = 1.09 mm
+     brush/winkler m=2       2.76%   5.94%
+     cattaneo-mindlin m=1.5  1.67%   5.65%
+     free m                  1.33%   5.50%
+  digit_flat_batch_*.pkl: 270 slides, free m median 1.35 (IQR 1.23-1.56), full slip after u* = 0.89 mm
+     brush/winkler m=2       2.59%  10.29%
+     cattaneo-mindlin m=1.5  2.07%  10.22%
+     free m                  1.75%  10.20%

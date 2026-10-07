@@ -1,0 +1,7 @@
+gelsight sphere batch 1: 81 trajectories measured (skipped: {'short': 46, 'edge': 21, 'noisy': 0})
+contact radius ~ F^beta: median beta = 0.326 +- 0.007 (IQR 0.303 - 0.371)
+  ring radius 7.1 -> 11.8 px over a force span of 4.34x
+  ideal measurement: elastic half-space (Hertz) 0.333, Winkler / hydroelastic 0.250
+  the same measurement on synthetic images at this scale (exact surfaces, real contrast and noise):
+    hertz    reads beta = 0.366 +- 0.001 (rings 6.8 -> 11.6 px)
+    winkler  reads beta = 0.297 +- 0.000 (rings 8.0 -> 12.3 px)
