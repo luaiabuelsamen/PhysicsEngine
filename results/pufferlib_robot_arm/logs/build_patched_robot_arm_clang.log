@@ -1,0 +1,15 @@
+28086 |         read(((struct pollfd*)pDevice->alsa.pPollDescriptorsCapture)[0].fd, &t, sizeof(t));
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+external/miniaudio.h:28107:9: warning: ignoring return value of ‘read’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+28107 |         read(((struct pollfd*)pDevice->alsa.pPollDescriptorsPlayback)[0].fd, &t, sizeof(t));
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from raudio.c:282:
+external/jar_mod.h: In function ‘jar_mod_load_file’:
+external/jar_mod.h:1541:13: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+ 1541 |             fread(modctx->modfile, fsize, 1, f);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Compiling ocean/robot_arm/robot_arm.cu -> puffer...
+Built: ./puffer
+real	4m45.603s
+user	4m53.114s
+sys	0m4.896s

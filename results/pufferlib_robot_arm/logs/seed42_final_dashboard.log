@@ -1,0 +1,17 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ PufferLib 5.0   🐡             GPU: 2315   VRAM:   9.1/15G    RAM:  0.0G     │
+│                                                                              │
+│ Env           robot_arm    Evaluate     59s 26  87%    Losses      -0.045    │
+│ Params           413.2K      Model         0ms   0%    policy      -0.034    │
+│ Steps            199.8M      Env           0ms   0%    value        0.005    │
+│ SPS                8.8K      Copy          0ms   0%    entropy     13.819    │
+│ Epoch               381    Train        8s 391  12%    old_kl       0.000    │
+│ Uptime     0d 5h 3m 53s      Model      8s 375  12%    kl           0.000    │
+│ To go               0ms      Misc         16ms   0%    clipfrac     0.000    │
+│                                                                              │
+│ score                         0.000   perf                          0.000    │
+│ success_rate                  0.000   grasp_rate                    0.046    │
+│ lift_rate                     0.003   transport_rate                0.000    │
+real	314m46.120s
+user	0m8.701s
+sys	0m20.955s

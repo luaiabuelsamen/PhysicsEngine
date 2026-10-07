@@ -1,0 +1,4 @@
+Compiling cartpole...
+warning: unknown warning option '-Werror=array-parameter'; did you mean '-Werror=unused-parameter'? [-Wunknown-warning-option]
+1 warning generated.
+Built: ./cartpole

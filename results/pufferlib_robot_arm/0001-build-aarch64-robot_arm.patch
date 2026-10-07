@@ -1,0 +1,77 @@
+From 6901c83cf59549d27c7d2f8a66b067e122805341 Mon Sep 17 00:00:00 2001
+From: Luai <luai.abuelsamen@mail.mcgill.ca>
+Date: Tue, 6 Oct 2026 23:08:14 -0700
+Subject: [PATCH] build.sh: build on Linux aarch64; accept obs_t from a .cu
+ env's header
+
+- raylib has no Linux arm64 release, so on aarch64 the amd64 archive was
+  linked and every env failed with "libraylib.a: file in wrong format".
+  Build the same 5.5 tag from source into the release layout instead.
+- robot_arm.cu gets obs_t from robot_arm.h (via robot_arm_cuda.cuh), so
+  the native obs_t check rejected it on every platform. For .cu envs, also
+  accept the typedef in the env's .h.
+
+Tested on a Jetson Orin NX (aarch64, CUDA 12.6, sm_87, clang 14).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ build.sh | 25 +++++++++++++++++++++++--
+ 1 file changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/build.sh b/build.sh
+index 6822e9d..550f589 100755
+--- a/build.sh
++++ b/build.sh
+@@ -81,7 +81,10 @@ fi
+ # Linux/mac
+ PLATFORM="$(uname -s)"
+ if [ "$PLATFORM" = "Linux" ]; then
+-    RAYLIB_NAME='raylib-5.5_linux_amd64'
++    case "$(uname -m)" in
++        aarch64|arm64) RAYLIB_NAME='raylib-5.5_linux_arm64' ;;  # built from source below
++        *)             RAYLIB_NAME='raylib-5.5_linux_amd64' ;;
++    esac
+     OMP_FLAGS=(-fopenmp)
+     OMP_LIB=-lomp5
+     SANITIZE_FLAGS=(-fsanitize=address,undefined,bounds,pointer-overflow -fno-omit-frame-pointer)
+@@ -117,10 +120,25 @@ download() {
+     esac
+ }
+ 
++# raylib publishes no Linux arm64 release (Jetson, Graviton, Raspberry Pi), so
++# build the same 5.5 tag from source into the release archives' layout.
++build_raylib() {
++    local name=$1
++    [ -d "$name" ] && return
++    echo "Building $name from source..."
++    download raylib-5.5 "https://github.com/raysan5/raylib/archive/refs/tags/5.5.tar.gz"
++    make -C raylib-5.5/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC -j"$(nproc)" > /dev/null
++    mkdir -p "$name/include" "$name/lib"
++    cp raylib-5.5/src/raylib.h raylib-5.5/src/raymath.h raylib-5.5/src/rlgl.h "$name/include/"
++    cp raylib-5.5/src/libraylib.a "$name/lib/"
++}
++
+ RAYLIB_URL="https://github.com/raysan5/raylib/releases/download/5.5"
+ if [ "$MODE" = "web" ]; then
+     RAYLIB_NAME='raylib-5.5_webassembly'
+     download "$RAYLIB_NAME" "$RAYLIB_URL/$RAYLIB_NAME.zip"
++elif [ "$RAYLIB_NAME" = "raylib-5.5_linux_arm64" ]; then
++    build_raylib "$RAYLIB_NAME"
+ else
+     download "$RAYLIB_NAME" "$RAYLIB_URL/$RAYLIB_NAME.tar.gz"
+ fi
+@@ -457,7 +475,10 @@ else
+     ENV_HEADER="$SRC_DIR/$ENV.h"
+ fi
+ mkdir -p build
+-if ! grep -q 'typedef[[:space:]].*obs_t' "$ENV_HEADER" 2>/dev/null; then
++# A .cu env may take obs_t from its .h (robot_arm.cu includes robot_arm.h).
++OBS_T_FILES=("$ENV_HEADER")
++[ "$USE_GPU_ENV" = "1" ] && OBS_T_FILES+=("$SRC_DIR/$ENV.h")
++if ! grep -qs 'typedef[[:space:]].*obs_t' "${OBS_T_FILES[@]}"; then
+     echo "Error: $ENV_HEADER must typedef obs_t"
+     exit 1
+ fi
+-- 
+2.34.1
+
