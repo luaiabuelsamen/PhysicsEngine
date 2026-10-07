@@ -43,8 +43,10 @@ TacSL (NVIDIA's visuotactile simulation library, built on Isaac Gym / Isaac
 Lab) is the strongest recent fast tactile simulator. Both are models, so V2
 measures where they differ, not which is right. V3 decides that.
 
-**Where it runs.** TacSL needs an x86 machine with an RTX GPU, so it runs on
-Modal, not on the Jetson. libphys runs on the Jetson.
+**Where it runs.** TacSL needs an x86 machine with an RTX GPU, which the
+Jetson is not, so V2 needs paid cloud compute. It does not run until Luai
+approves an explicit budget (job, GPU type, count, hours, dollars). libphys
+runs on the Jetson.
 
 **Matched setups.** Same indenter geometry, gel size and modulus (E fitted
 so the two agree on the normal force-depth curve at 1 mm), and the same
