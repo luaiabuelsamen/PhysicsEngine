@@ -10,7 +10,9 @@
   never completes a pick-and-place:
   - The grasp rate peaks at 23%, then settles near 5%.
   - The final policy pushes the cube away from itself.
-- **Seeds 1 and 2** are pending until the GPU is free.
+- **Seeds 1 and 2** were not run. The orchestrator cancelled them: the
+  GPU belongs to the flagship, and seed 42 showed no learning at this
+  budget.
 
 Sources:
 - Learning curves: `results/pufferlib_robot_arm/runs.json` (from
@@ -77,7 +79,7 @@ an episode. The labels are the training-log rates at that checkpoint.
 | Item | Result |
 |---|---|
 | (1) Patch builds robot_arm on aarch64; no change for envs that already build | **pass** on aarch64, where every env failed before. x86_64 is untested here; the raylib change applies only when `uname -m` is aarch64/arm64 |
-| (2) 3 seeds finish; rates at the end above the first logged values for ≥2 of 3 seeds | **incomplete**: 1 of 3 seeds. Seed 42 ends above its start on grasp (0.000 → 0.046) and lift (0.000 → 0.003), with success 0 |
+| (2) 3 seeds finish; rates at the end above the first logged values for ≥2 of 3 seeds | **not completed**: seeds 1 and 2 cancelled (GPU priority). Seed 42 ends above its start on grasp (0.000 → 0.046) and lift (0.000 → 0.003), with success 0 |
 | (3) GIF 8-15 s, ≤ 5 MB, rendered on the Jetson | **pass** (12 s, 1.7 MB). It shows no successful pick-and-place |
 | (4) Local PR branch and description, not pushed | **pass** |
 
